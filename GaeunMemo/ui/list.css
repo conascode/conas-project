@@ -1,0 +1,101 @@
+body { display: flex; flex-direction: column; }
+
+/* the six pastels side by side — the list's own band.
+   The list has no single colour, so "제목 줄" mode shows the same thin band. */
+.band {
+  background: linear-gradient(90deg,
+    var(--ink-lavender) 0 16.66%, var(--ink-rose) 16.66% 33.33%, var(--ink-mint) 33.33% 50%,
+    var(--ink-apricot) 50% 66.66%, var(--ink-sky) 66.66% 83.33%, var(--ink-cream) 83.33% 100%);
+}
+[data-band="full"] .band { display: block; }
+
+.bar {
+  height: 40px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 6px 0 14px;
+}
+
+.heading { margin: 0; font-size: 14px; font-weight: 700; line-height: 1; }
+.count {
+  margin-left: 6px;
+  color: var(--color-muted);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.search {
+  flex: none;
+  height: 30px;
+  margin: 0 10px 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 0;
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  font: 400 13px/30px var(--font-body);
+  -webkit-user-select: text;
+  user-select: text;
+}
+.search::placeholder { color: var(--color-muted); }
+.search::-webkit-search-cancel-button { display: none; }
+
+.rows {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 0 8px;
+  list-style: none;
+  overflow-y: auto;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  column-gap: 10px;
+  align-items: baseline;
+  width: 100%;
+  padding: 7px 14px;
+  text-align: left;
+  transition: background-color var(--dur-micro) ease;
+}
+.row:hover { background: var(--color-paper-2); }
+.row:active { background: var(--color-paper-3); }
+.row:focus-visible { background: var(--color-paper-2); }
+.row.is-context { background: var(--color-paper-3); }
+
+.dot { align-self: start; width: 8px; height: 8px; margin-top: 6px; background: var(--dot); }
+.row-title {
+  min-width: 0;
+  font-size: 13.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.row-title.untitled { color: var(--color-muted); font-weight: 400; }
+.when {
+  font-size: 11.5px;
+  color: var(--color-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.preview {
+  grid-column: 2 / 4;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* closed notes recede but keep AA contrast */
+.row.closed .row-title { color: var(--color-muted); font-weight: 400; }
+.row.closed .dot { opacity: 0.4; }
+
+.empty { margin: 0; padding: 28px 14px; color: var(--color-muted); font-size: 13px; text-align: center; }
+
+.ctx { position: fixed; min-width: 120px; }

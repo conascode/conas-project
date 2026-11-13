@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-note-set-font"
+description = "Enables the note_set_font command without any pre-configured scope."
+commands.allow = ["note_set_font"]
+
+[[permission]]
+identifier = "deny-note-set-font"
+description = "Denies the note_set_font command without any pre-configured scope."
+commands.deny = ["note_set_font"]

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="ko" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GaeunMemo</title>
+  <link rel="stylesheet" href="common.css">
+  <link rel="stylesheet" href="note.css">
+  <script src="boot.js"></script>
+  <script src="ui.js" defer></script>
+  <script src="note.js" defer></script>
+</head>
+<body>
+  <div class="band" id="band"></div>
+  <header class="bar" id="bar">
+    <input id="title" class="title" placeholder="제목" readonly tabindex="-1" spellcheck="false" autocomplete="off" maxlength="500" aria-label="제목">
+    <div class="tools">
+      <button class="tool" id="pin" aria-label="항상 위에 고정" title="항상 위에 고정" aria-pressed="false">
+        <svg class="icon round" viewBox="0 0 14 14" aria-hidden="true"><path class="pin-head" d="M8.2 2.2l3.6 3.6-1.8.6-1.9 1.9.2 1.9-.9.9L3.9 6.6l.9-.9 1.9.2 1.9-1.9z"/><path d="M5.6 8.4L2.5 11.5"/></svg>
+      </button>
+      <button class="tool" id="new" aria-label="새 메모" title="새 메모 (Ctrl+N)">
+        <svg class="icon" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 2.5v9M2.5 7h9"/></svg>
+      </button>
+      <button class="tool" id="more" aria-label="더보기" title="더보기" aria-haspopup="menu" aria-expanded="false">
+        <svg class="icon" viewBox="0 0 14 14" aria-hidden="true"><rect class="solid" x="2" y="6" width="2" height="2"/><rect class="solid" x="6" y="6" width="2" height="2"/><rect class="solid" x="10" y="6" width="2" height="2"/></svg>
+      </button>
+      <button class="tool" id="close" aria-label="닫기" title="닫기 (Ctrl+W)">
+        <svg class="icon" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>
+      </button>
+    </div>
+  </header>
+  <textarea id="body" class="body" placeholder="메모" spellcheck="false" aria-label="메모"></textarea>
+
+  <div class="menu" id="menu" role="menu" hidden>
+    <button class="menu-item" role="menuitem" data-act="rename">제목 수정</button>
+    <div class="swatches" id="swatches" role="radiogroup" aria-label="색상"></div>
+    <button class="menu-item has-value" role="menuitem" data-act="band" id="band-btn">
+      <span>띠 모양</span><span class="menu-value" id="band-value">얇은 띠</span>
+    </button>
+    <button class="menu-item" role="menuitem" data-act="theme" id="theme-btn">라이트 모드</button>
+    <button class="menu-item" role="menuitem" data-act="list">메모 목록</button>
+    <button class="menu-item" role="menuitem" data-act="delete">메모 삭제</button>
+  </div>
+
+  <div class="confirm" id="confirm" role="alertdialog" aria-labelledby="confirm-msg" hidden>
+    <div class="confirm-card">
+      <p id="confirm-msg">삭제하시겠습니까?</p>
+      <div class="actions">
+        <button class="btn" id="confirm-keep">유지</button>
+        <button class="btn strong" id="confirm-delete">삭제</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

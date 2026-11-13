@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-note-new-near"
+description = "Enables the note_new_near command without any pre-configured scope."
+commands.allow = ["note_new_near"]
+
+[[permission]]
+identifier = "deny-note-new-near"
+description = "Denies the note_new_near command without any pre-configured scope."
+commands.deny = ["note_new_near"]

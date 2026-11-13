@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GaeunMemo</title>
+  <link rel="stylesheet" href="common.css">
+  <link rel="stylesheet" href="list.css">
+  <script src="boot.js"></script>
+  <script src="ui.js" defer></script>
+  <script src="list.js" defer></script>
+</head>
+<body>
+  <div class="band" id="band"></div>
+  <header class="bar" id="bar">
+    <h1 class="heading">메모<span class="count" id="count"></span></h1>
+    <div class="tools">
+      <button class="tool" id="new" aria-label="새 메모" title="새 메모">
+        <svg class="icon" viewBox="0 0 14 14" aria-hidden="true"><path d="M7 2.5v9M2.5 7h9"/></svg>
+      </button>
+      <button class="tool" id="close" aria-label="닫기" title="닫기">
+        <svg class="icon" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7"/></svg>
+      </button>
+    </div>
+  </header>
+  <input class="search" id="search" type="search" placeholder="검색" spellcheck="false" autocomplete="off" aria-label="메모 검색">
+  <p class="empty" id="empty" hidden></p>
+  <ul class="rows" id="rows" aria-label="메모 목록"></ul>
+
+  <div class="menu ctx" id="ctx" role="menu" hidden>
+    <button class="menu-item" role="menuitem" id="ctx-delete">메모 삭제</button>
+  </div>
+
+  <div class="confirm" id="confirm" role="alertdialog" aria-labelledby="confirm-msg" hidden>
+    <div class="confirm-card">
+      <p id="confirm-msg">삭제하시겠습니까?</p>
+      <div class="actions">
+        <button class="btn" id="confirm-keep">유지</button>
+        <button class="btn strong" id="confirm-delete">삭제</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

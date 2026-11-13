@@ -1,0 +1,1388 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>GaeunMemo 2.0 — Native Rewrite 기술 분석·설계 보고서</title>
+<link rel="stylesheet" href="report.css">
+</head>
+<body>
+
+<!-- ============================ COVER ============================ -->
+<section class="cover">
+  <div class="band"></div>
+  <h1>GaeunMemo 2.0 — Native Rewrite<br>기술 분석 · 아키텍처 설계 · 구현 계획 보고서</h1>
+  <div class="sub">Phase 1 산출물: 기존 시스템(v1, Tauri 2 + WebView2) 분석, 성능 기준선 측정, Win32 Native 재개발 설계, 데이터 마이그레이션 계획, GDI/Direct2D 프로토타입 설계</div>
+  <table>
+    <tbody>
+      <tr><th style="width:28%">문서 번호</th><td>GM2-TDR-001</td><th style="width:20%">개정</th><td>Rev 1.0 (초판)</td></tr>
+      <tr><th>작성일</th><td>2026-11-13</td><th>상태</th><td>검토 요청 (구현 착수 전)</td></tr>
+      <tr><th>대상 시스템</th><td colspan="3">GaeunMemo v0.1.0 (이하 v1) — <code>gaeunmemo/</code> 저장소, Rust 1.100.0 · Tauri 2.12.5 · WebView2 157.0.4341.46</td></tr>
+      <tr><th>목표 시스템</th><td colspan="3">GaeunMemo 2.0 (이하 v2) — Rust + Win32 API, Native HWND / Native Edit Control, GDI 기본 렌더링, Direct2D·DirectWrite 선택적 사용, SQLite 저장소</td></tr>
+      <tr><th>측정 환경</th><td colspan="3">AMD Ryzen AI 5 435 (논리 CPU 12개), RAM 16 GB, Windows 11 Home 10.0.26200, 2560×1600 @150 % 배율, 단일 모니터</td></tr>
+      <tr><th>수치 표기 규칙</th><td colspan="3"><span class="M">측정</span> 이 저장소의 빌드를 위 환경에서 직접 잰 값 · <span class="E">예상</span> 근거를 밝힌 추정치 · <span class="T">목표</span> v2가 달성해야 할 합격 기준 · <span class="U">미확인</span> 아직 검증하지 않은 사항. 표기가 없는 서술은 코드와 문서에서 확인한 사실이다.</td></tr>
+    </tbody>
+  </table>
+  <div class="abstract">
+    <h3>요약</h3>
+    <p>v1은 기능 요구사항을 모두 충족하지만, 메모 창을 그리는 데 Chromium 기반 WebView2를 사용하기 때문에 메모 1개만 열어도 프로세스 7개, 개인 메모리 약 99 MB <span class="M">측정</span>를 사용하고, 아무 입력이 없을 때도 CPU 한 코어의 약 1.5 % <span class="M">측정</span>를 계속 소모한다. 이 중 앱 자신의 Rust 코드가 쓰는 개인 메모리는 4.9 MB <span class="M">측정</span>로, 비용의 95 % 이상이 WebView2 런타임에서 발생한다. 또 v1은 메모리를 줄이려고 WebView2의 GPU 사용을 강제로 끄고 있으며, 이는 v2 지침이 금지하는 방식이다.</p>
+    <p>본 보고서는 v1의 구조·기능·데이터를 전부 목록화하고(기능 28개, IPC 명령 16개, 이벤트 4개, 저장 필드 16개 + 좌표 4개), WebView2를 완전히 제거한 단일 프로세스 Win32 아키텍처를 설계한다. 설계 목표는 트레이 대기 시 개인 메모리 3 MB 이하, 메모 10개 12 MB 이하, 유휴 CPU 사실상 0 % <span class="T">목표</span>이다. 렌더링 방식(GDI 대 Direct2D)과 본문 컨트롤(EDIT 대 RichEdit)은 결론을 미리 정하지 않고, 6장·13장에 정의한 프로토타입으로 실측해 결정한다. 저장소는 SQLite로 옮기되 v1 데이터는 원본을 보존한 채 한 번의 트랜잭션으로 가져온다.</p>
+  </div>
+</section>
+
+<!-- ============================ TOC ============================ -->
+<section>
+  <h2>목차</h2>
+  <nav class="toc">
+    <a href="#s1"><span class="t">1. Executive Summary</span><span class="dots"></span><span class="pn" data-for="s1"></span></a>
+    <a href="#s2"><span class="t">2. Project Overview</span><span class="dots"></span><span class="pn" data-for="s2"></span></a>
+    <a href="#s3"><span class="t">3. Existing System Analysis</span><span class="dots"></span><span class="pn" data-for="s3"></span></a>
+    <a class="sub" href="#s3-4"><span class="t">3.4 기능 목록 (F-01 ~ F-28)</span><span class="dots"></span><span class="pn" data-for="s3-4"></span></a>
+    <a class="sub" href="#s3-6"><span class="t">3.6 데이터 구조와 저장 방식</span><span class="dots"></span><span class="pn" data-for="s3-6"></span></a>
+    <a href="#s4"><span class="t">4. Technology Stack Evaluation</span><span class="dots"></span><span class="pn" data-for="s4"></span></a>
+    <a href="#s5"><span class="t">5. Architecture Design</span><span class="dots"></span><span class="pn" data-for="s5"></span></a>
+    <a href="#s6"><span class="t">6. Windows Native Implementation</span><span class="dots"></span><span class="pn" data-for="s6"></span></a>
+    <a class="sub" href="#s6-3"><span class="t">6.3 Windows 메시지 처리 표</span><span class="dots"></span><span class="pn" data-for="s6-3"></span></a>
+    <a class="sub" href="#s6-7"><span class="t">6.7 GDI / Direct2D 프로토타입 설계</span><span class="dots"></span><span class="pn" data-for="s6-7"></span></a>
+    <a href="#s7"><span class="t">7. UI/UX Reconstruction</span><span class="dots"></span><span class="pn" data-for="s7"></span></a>
+    <a href="#s8"><span class="t">8. Memory Management</span><span class="dots"></span><span class="pn" data-for="s8"></span></a>
+    <a href="#s9"><span class="t">9. CPU and Rendering Optimization</span><span class="dots"></span><span class="pn" data-for="s9"></span></a>
+    <a href="#s10"><span class="t">10. Storage and Recovery Architecture</span><span class="dots"></span><span class="pn" data-for="s10"></span></a>
+    <a href="#s11"><span class="t">11. Threading and Event Processing</span><span class="dots"></span><span class="pn" data-for="s11"></span></a>
+    <a href="#s12"><span class="t">12. Database Design</span><span class="dots"></span><span class="pn" data-for="s12"></span></a>
+    <a href="#s13"><span class="t">13. Performance Benchmarking</span><span class="dots"></span><span class="pn" data-for="s13"></span></a>
+    <a href="#s14"><span class="t">14. Testing and QA Strategy</span><span class="dots"></span><span class="pn" data-for="s14"></span></a>
+    <a href="#s15"><span class="t">15. Risk Assessment</span><span class="dots"></span><span class="pn" data-for="s15"></span></a>
+    <a href="#s16"><span class="t">16. Migration Strategy</span><span class="dots"></span><span class="pn" data-for="s16"></span></a>
+    <a href="#s17"><span class="t">17. Development Roadmap</span><span class="dots"></span><span class="pn" data-for="s17"></span></a>
+    <a href="#s18"><span class="t">18. Acceptance Criteria</span><span class="dots"></span><span class="pn" data-for="s18"></span></a>
+    <a href="#s19"><span class="t">19. Technical References</span><span class="dots"></span><span class="pn" data-for="s19"></span></a>
+    <a href="#s20"><span class="t">20. Appendix</span><span class="dots"></span><span class="pn" data-for="s20"></span></a>
+    <a class="sub" href="#s20-c"><span class="t">A.3 구현 체크리스트</span><span class="dots"></span><span class="pn" data-for="s20-c"></span></a>
+  </nav>
+
+  <table>
+    <caption>문서 이력 및 용어</caption>
+    <thead><tr><th style="width:16%">항목</th><th>내용</th></tr></thead>
+    <tbody>
+      <tr><td>Rev 1.0</td><td>2026-11-13 초판. Phase 1 (분석·설계) 범위. 코드 변경 없음 — 단, 기준선 측정을 위해 v1의 GPU 켬 변형을 임시 빌드했고 측정 후 소스를 원상 복구함.</td></tr>
+      <tr><td>v1 / v2</td><td>v1 = 현재 GaeunMemo 0.1.0 (Tauri + WebView2). v2 = 본 보고서가 설계하는 GaeunMemo 2.0 (Win32 Native).</td></tr>
+      <tr><td>개인 메모리</td><td>Process Private Bytes (<code>PrivateMemorySize64</code>, 커밋된 개인 페이지). 공유 DLL 페이지를 중복 계산하지 않아 프로세스 간 합산에 적합하다. 작업 집합(WS)은 참고용으로만 표기.</td></tr>
+      <tr><td>CPU %(1코어)</td><td>측정 구간 동안 해당 프로세스 트리의 <code>TotalProcessorTime</code> 증가량 ÷ 경과 시간 × 100. 100 % = 논리 CPU 1개를 꽉 채움 (이 PC는 12개).</td></tr>
+      <tr><td>앵커 창</td><td>작업표시줄 버튼 하나만 표시하기 위해 v1이 만든 WebView 없는 Win32 창 (<code>gaeunmemo_taskbar</code> 클래스).</td></tr>
+      <tr><td>띠 / 제목 줄</td><td>메모 상단의 색상 표시. 모드: none / thin(4 px) / full(제목 줄 34 px 전체를 메모 색으로).</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================ 1 ============================ -->
+<h2 id="s1"><span class="no">1.</span>Executive Summary</h2>
+<div class="grid2">
+  <div>
+    <h3>1.1 결론</h3>
+    <ul>
+      <li><b>재개발은 타당하다.</b> v1 메모리의 95 % 이상, 유휴 CPU의 사실상 전부가 WebView2 런타임에서 발생한다 <span class="M">측정</span>. 앱 코드 최적화로는 줄일 수 없는 비용이다(3.7절).</li>
+      <li><b>기능 손실 없이 재현 가능하다.</b> 28개 기능 중 25개는 Win32 표준 기능으로 직접 재현되고, 3개(선택 영역 색, 커서 색, 다단계 실행 취소)는 컨트롤 선택에 따라 추가 구현이 필요하다(7.4절).</li>
+      <li><b>v1 Rust 코드의 약 40 %는 재사용한다.</b> 데이터 모델·가져오기·자동 실행·앵커 창·모니터 보정 로직(약 700행)은 WebView와 무관하다(4.4절).</li>
+      <li><b>저장소는 SQLite로 옮긴다.</b> 메모 단위 갱신으로 파일 전체 재작성을 없애고, 무결성 검사와 백업 복원 경로를 갖춘다. v1 <code>notes.json</code>은 지우지 않는다(10·12·16장).</li>
+      <li><b>렌더링은 실측 후 결정한다.</b> 기본은 GDI + Native EDIT. Direct2D는 프로토타입에서 이득이 측정될 때만 채택한다(6.7절, 13장).</li>
+    </ul>
+  </div>
+  <div>
+    <h3>1.2 v1 기준선과 v2 목표</h3>
+    <table>
+      <thead><tr><th style="width:36%">지표</th><th class="num">v1 GPU 끔 <span class="M">측정</span></th><th class="num">v1 GPU 켬 <span class="M">측정</span></th><th class="num">v2 <span class="T">목표</span></th></tr></thead>
+      <tbody>
+        <tr><td>프로세스 수 (메모 1개)</td><td class="num">7</td><td class="num">7</td><td class="num">1</td></tr>
+        <tr><td>개인 메모리, 트레이만</td><td class="num">2.0 MB</td><td class="num">—</td><td class="num">≤ 3 MB</td></tr>
+        <tr><td>개인 메모리, 메모 1개</td><td class="num">99.1 MB</td><td class="num">159.3 MB</td><td class="num">≤ 6 MB</td></tr>
+        <tr><td>개인 메모리, 메모 10개</td><td class="num">140.0 MB</td><td class="num">278.6 MB</td><td class="num">≤ 12 MB</td></tr>
+        <tr><td>유휴 CPU (메모 1개, 1코어 %)</td><td class="num">1.55 %</td><td class="num">1.75 %</td><td class="num">≤ 0.02 %</td></tr>
+        <tr><td>타이핑 CPU (초당 약 17자)</td><td class="num">28.3 %</td><td class="num">32.1 %</td><td class="num">≤ 3 %</td></tr>
+        <tr><td>메모 1개 창 표시까지</td><td class="num">0.11–0.28 s</td><td class="num">—</td><td class="num">≤ 0.10 s</td></tr>
+        <tr><td>설치 파일</td><td class="num">1.03 MiB</td><td class="num">—</td><td class="num">≤ 1.5 MiB</td></tr>
+        <tr><td>GPU 정책</td><td colspan="2">WebView2 GPU 강제 비활성 (지침 위반)</td><td>강제 비활성 없음</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+<h3>1.3 의사결정 요약</h3>
+<table>
+  <thead><tr><th style="width:17%">결정</th><th style="width:27%">선택</th><th style="width:28%">주요 근거</th><th>기각한 대안과 이유</th></tr></thead>
+  <tbody>
+    <tr><td>UI 계층</td><td>Win32 직접 호출 (<code>windows-sys</code>)</td><td>런타임 0, 프로세스 1, IME·접근성을 OS 컨트롤이 제공</td><td>winit/egui·Slint·iced: 컨트롤 자체 렌더링으로 IME·텍스트 편집 재구현 필요. WinUI 3: Windows App SDK 런타임 의존. Qt/wx: C++ 런타임·수 MB 증가.</td></tr>
+    <tr><td>본문 편집</td><td>Native EDIT (1안), RichEdit 평문 모드 (2안) — 실측 후 확정</td><td>EDIT은 가장 가볍고 한글 IME를 OS가 처리</td><td>자체 텍스트 엔진: IME·캐럿·선택·접근성 직접 구현 → 위험·비용 과다.</td></tr>
+    <tr><td>창 외곽 렌더링</td><td>GDI 더블 버퍼 (기본), Direct2D (조건부)</td><td>GDI는 추가 DLL·장치 자원 없음</td><td>GDI+: 별도 런타임 로드, 유지보수 모드. Direct2D 전면 사용: 창마다 장치 자원 → 메모리 증가 <span class="E">예상</span>.</td></tr>
+    <tr><td>저장소</td><td>SQLite (WAL, <code>synchronous=FULL</code>)</td><td>메모 단위 원자적 갱신, 무결성 검사, 온라인 백업</td><td>JSON 유지: 의존성 0이지만 매 저장마다 전체 파일 재작성. Sled/redb: 생태계·도구 부족.</td></tr>
+    <tr><td>스레드</td><td>UI 스레드 1 + 저장 스레드 1</td><td>UI에서 파일 I/O 제거, 잠금 범위 최소</td><td>스레드 풀/async 런타임: 필요 없는 의존성(tokio) 추가.</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================ 2 ============================ -->
+<h2 id="s2"><span class="no">2.</span>Project Overview</h2>
+<div class="grid2">
+  <div>
+    <h3>2.1 배경</h3>
+    <p>GaeunMemo는 Windows 바탕화면 스티커 메모 앱이다. 메모 하나가 프레임 없는 독립 창 하나이며, 트레이에 상주하고 컴퓨터를 켤 때 자동 실행된다. 즉 <b>하루 종일, 수 주 동안 켜져 있는 상주형 프로그램</b>이므로 유휴 상태의 메모리·CPU 비용이 사용자 체감 비용의 대부분을 차지한다.</p>
+    <p>v1은 2026-11-13 하루 동안 Rust + Tauri 2로 개발되었고 요구 기능을 모두 갖췄다. 개발 과정에서 메모리를 줄이기 위해 (1) 모든 창이 렌더러 하나를 공유하도록 하고 (2) GPU를 꺼서 메모 10개 기준 개인 메모리를 468 MB → 140 MB <span class="M">측정</span>로 줄였으나, 남은 비용은 WebView2 구조에서 나오며 (2)는 v2 지침이 금지한다.</p>
+    <h3>2.2 범위 (Phase 1)</h3>
+    <ul>
+      <li>포함: v1 구조·의존성·UI·기능·데이터 분석, 성능 기준선 측정, v2 아키텍처, 마이그레이션 계획, GDI/Direct2D 프로토타입 설계, 구현 계획.</li>
+      <li>제외: v2 코드 작성(Phase 2 이후), 설치 관리자 제작, 코드 서명.</li>
+    </ul>
+  </div>
+  <div>
+    <h3>2.3 설계 원칙 (지침 반영)</h3>
+    <table>
+      <thead><tr><th style="width:8%">#</th><th>원칙</th><th style="width:30%">본 문서 반영 위치</th></tr></thead>
+      <tbody>
+        <tr><td class="c">1</td><td>기존 소스 완전 분석</td><td>3장</td></tr>
+        <tr><td class="c">2</td><td>기능·UI 누락 없는 목록화</td><td>3.4절, 7장, 부록 A.1</td></tr>
+        <tr><td class="c">3</td><td>데이터 구조·저장 방식 분석</td><td>3.6절</td></tr>
+        <tr><td class="c">4</td><td>디자인 정확 재현 명세</td><td>7장</td></tr>
+        <tr><td class="c">5</td><td>최소 프로토타입 우선</td><td>6.7절, 17장 P0</td></tr>
+        <tr><td class="c">6</td><td>GDI vs Direct2D 실측 비교</td><td>6.7절, 13.4절</td></tr>
+        <tr><td class="c">7</td><td>Native Edit 우선</td><td>6.4절</td></tr>
+        <tr><td class="c">8</td><td>단일 프로세스</td><td>5.2절</td></tr>
+        <tr><td class="c">9</td><td>저장을 UI 스레드와 분리</td><td>11장</td></tr>
+        <tr><td class="c">10</td><td>테스트 통과 후 다음 단계</td><td>17장 단계별 종료 기준</td></tr>
+      </tbody>
+    </table>
+    <h3>2.4 금지 사항 준수 방법</h3>
+    <ul class="small">
+      <li>측정하지 않은 개선 주장 금지 → 모든 수치에 <span class="M">측정</span><span class="E">예상</span><span class="T">목표</span> 표기.</li>
+      <li>기능 임의 삭제 금지 → 28개 기능 각각의 재현 방식·합격 기준 정의(7·18장).</li>
+      <li>데이터 손상 금지 → 원본 보존 마이그레이션, 실패 시 v1 파일 무변경(16장).</li>
+      <li>무조건적 GPU 비활성 금지 → v2는 GPU 설정을 강제하지 않음(9.4절).</li>
+    </ul>
+  </div>
+</div>
+
+<!-- ============================ 3 ============================ -->
+<h2 id="s3"><span class="no">3.</span>Existing System Analysis</h2>
+<h3>3.1 저장소 구조와 코드 규모</h3>
+<div class="grid2">
+<table>
+  <caption>표 3-1. Rust 백엔드 (src-tauri/src, 1,835행)</caption>
+  <thead><tr><th style="width:21%">모듈</th><th class="num" style="width:9%">행</th><th>책임</th><th style="width:25%">v2 재사용</th></tr></thead>
+  <tbody>
+    <tr><td><code>main.rs</code></td><td class="num">144</td><td>시작 순서, AppState, 첫 실행, 종료 시 flush</td><td>재작성</td></tr>
+    <tr><td><code>model.rs</code></td><td class="num">254</td><td>데이터 모델, 기본값, 정규화(sanitize), 숫자→문자 띠 변환</td><td>대부분 재사용</td></tr>
+    <tr><td><code>store.rs</code></td><td class="num">379</td><td>로드, 손상 백업, 원자적 쓰기, 일일 백업, 저장 스레드(throttle)</td><td>저장 스레드 구조 재사용, 백엔드 교체</td></tr>
+    <tr><td><code>import.rs</code></td><td class="num">101</td><td>StickyMemo 형식 1·2 변환</td><td>그대로</td></tr>
+    <tr><td><code>windows.rs</code></td><td class="num">486</td><td>메모·목록 창 생성, 접기, 핀, 띠, 표시/숨김, 모니터 보정</td><td>보정 로직만</td></tr>
+    <tr><td><code>commands.rs</code></td><td class="num">180</td><td>IPC 명령 16개</td><td>폐기 (함수 호출로 대체)</td></tr>
+    <tr><td><code>anchor.rs</code></td><td class="num">195</td><td>작업표시줄 앵커 창, 세션 종료 저장, 상단 가장자리 끌기, 최소 높이</td><td>앵커·세션 부분 재사용</td></tr>
+    <tr><td><code>tray.rs</code></td><td class="num">41</td><td>트레이 아이콘·메뉴 (Tauri API)</td><td>Shell_NotifyIcon으로 재작성</td></tr>
+    <tr><td><code>autostart.rs</code></td><td class="num">55</td><td>HKCU Run 등록·해제, 옛 항목 정리</td><td>그대로</td></tr>
+  </tbody>
+</table>
+<div>
+<table>
+  <caption>표 3-2. 프런트엔드 (ui/, 889행) 및 설정</caption>
+  <thead><tr><th style="width:28%">파일</th><th class="num" style="width:11%">행</th><th>내용</th></tr></thead>
+  <tbody>
+    <tr><td><code>note.html/.css/.js</code></td><td class="num">322</td><td>메모 창 DOM, 스타일, 편집·메뉴·삭제·접기·단축키</td></tr>
+    <tr><td><code>list.html/.css/.js</code></td><td class="num">303</td><td>목록 창, 검색, 정렬, 키보드, 우클릭 삭제</td></tr>
+    <tr><td><code>common.css</code></td><td class="num">184</td><td>색상 토큰(라이트/다크), 띠, 메뉴, 확인 카드</td></tr>
+    <tr><td><code>ui.js</code> / <code>boot.js</code></td><td class="num">80</td><td>IPC 큐, 4 px 끌기 임계, 확인 카드, 첫 페인트 전 테마 지정</td></tr>
+    <tr><td><code>tauri.conf.json</code></td><td class="num">32</td><td>CSP, 번들(NSIS), <code>mainBinaryName</code></td></tr>
+    <tr><td><code>capabilities/default.json</code></td><td class="num">27</td><td>명령별 허용 목록(18개 권한)</td></tr>
+    <tr><td><code>build.rs</code></td><td class="num">23</td><td>앱 명령 매니페스트</td></tr>
+    <tr><td><code>tools/make_icon.py</code></td><td class="num">81</td><td>아이콘 래스터 생성 (4× 슈퍼샘플링)</td></tr>
+  </tbody>
+</table>
+<div class="note">단위 테스트 23개(모델 4, 저장 11, 가져오기 4, 창 보정 3, 명령 1)가 모두 통과한다 <span class="M">측정</span>. UI 동작은 자동 테스트가 없고 수동·스크립트 입력으로만 검증되었다.</div>
+</div>
+</div>
+
+<h3>3.2 v1 런타임 아키텍처</h3>
+<figure>
+<svg viewBox="0 0 700 250" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="10">
+  <defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#444"/></marker></defs>
+  <rect x="5" y="5" width="300" height="240" fill="#F7F7F5" stroke="#555"/>
+  <text x="15" y="22" font-weight="700">gaeunmemo.exe (Rust, Tauri 2) — 개인 4.9 MB</text>
+  <rect x="15" y="32" width="135" height="44" fill="#fff" stroke="#888"/><text x="22" y="49">UI 스레드 (tao 루프)</text><text x="22" y="64" font-size="8.5">창 이벤트·트레이·앵커</text>
+  <rect x="160" y="32" width="135" height="44" fill="#fff" stroke="#888"/><text x="167" y="49">tokio 작업자</text><text x="167" y="64" font-size="8.5">async IPC 명령 16개</text>
+  <rect x="15" y="86" width="135" height="44" fill="#fff" stroke="#888"/><text x="22" y="103">AppState</text><text x="22" y="118" font-size="8.5">Mutex&lt;Data&gt;, last_blur, hidden</text>
+  <rect x="160" y="86" width="135" height="44" fill="#fff" stroke="#888"/><text x="167" y="103">저장 스레드</text><text x="167" y="118" font-size="8.5">mpsc, throttle 300 ms / 1 s</text>
+  <rect x="15" y="140" width="280" height="40" fill="#fff" stroke="#888"/><text x="22" y="157">WebView2 컨트롤러 × 창 수 (note-*, list)</text><text x="22" y="172" font-size="8.5">HWND 자식, 상단 가장자리 리전 서브클래스</text>
+  <rect x="15" y="190" width="280" height="45" fill="#EEF5EE" stroke="#888"/><text x="22" y="207">notes.json  (%APPDATA%\gaeunmemo)</text><text x="22" y="222" font-size="8.5">원자적 쓰기 · 일일 백업 7개 · 손상 시 broken 백업</text>
+  <rect x="380" y="5" width="315" height="240" fill="#FDF5EE" stroke="#BA7517"/>
+  <text x="390" y="22" font-weight="700">WebView2 런타임 프로세스 (메모 1개, GPU 끔)</text>
+  <g font-size="9.5">
+  <rect x="390" y="32" width="295" height="26" fill="#fff" stroke="#BA7517"/><text x="398" y="49">browser — 31.7 MB · 핸들 1,290 · 스레드 55</text>
+  <rect x="390" y="62" width="295" height="26" fill="#fff" stroke="#BA7517"/><text x="398" y="79">renderer (모든 창 공유) — 28.2 MB</text>
+  <rect x="390" y="92" width="295" height="26" fill="#fff" stroke="#BA7517"/><text x="398" y="109">gpu-process (소프트웨어 합성) — 13.3 MB</text>
+  <rect x="390" y="122" width="295" height="26" fill="#fff" stroke="#BA7517"/><text x="398" y="139">utility: NetworkService — 10.8 MB</text>
+  <rect x="390" y="152" width="295" height="26" fill="#fff" stroke="#BA7517"/><text x="398" y="169">utility: StorageService — 7.6 MB</text>
+  <rect x="390" y="182" width="295" height="26" fill="#fff" stroke="#BA7517"/><text x="398" y="199">crashpad-handler — 2.6 MB</text>
+  </g>
+  <text x="390" y="230" font-size="9">합계 99.1 MB 중 WebView2 몫 94.2 MB (95.1 %)  [측정]</text>
+  <line x1="305" y1="160" x2="388" y2="80" stroke="#444" marker-end="url(#a)"/>
+  <text x="309" y="104" font-size="8">IPC</text><text x="309" y="114" font-size="8">(JSON)</text>
+</svg>
+<figcaption>그림 3-1. v1 프로세스·스레드 구성과 메모 1개 열린 상태의 프로세스별 개인 메모리 (측정, 2026-11-13)</figcaption>
+</figure>
+
+<h3>3.3 IPC 인터페이스와 이벤트</h3>
+<table>
+  <thead><tr><th style="width:22%">명령 (프런트 → Rust)</th><th style="width:28%">인자 → 반환</th><th>동작</th><th style="width:17%">v2 대응</th></tr></thead>
+  <tbody>
+    <tr><td><code>note_get</code></td><td>id → NoteView?</td><td>제목·본문·색·핀·접힘·테마·띠·글자 크기·팔레트</td><td>창 생성 시 직접 참조</td></tr>
+    <tr><td><code>note_save</code></td><td>id, title, text</td><td>CR/LF 제거(제목), 500자/200,000자 제한, <code>updatedAt</code> 갱신, 저장 예약, 목록 갱신 이벤트</td><td>EN_CHANGE 처리기</td></tr>
+    <tr><td><code>note_set_color</code> / <code>note_set_font</code></td><td>id, color / size</td><td>팔레트 검증 / 10–32 고정</td><td>메뉴·휠 처리기</td></tr>
+    <tr><td><code>note_toggle_pin</code> / <code>_fold</code></td><td>id → bool</td><td>always-on-top / 창 높이 띠+34 px, 최소·최대 크기 전환</td><td>SetWindowPos</td></tr>
+    <tr><td><code>note_new_near</code> / <code>note_close</code></td><td>id</td><td>+28 px 위치에 새 메모 / 창 닫기(빈 메모는 삭제)</td><td>직접 호출</td></tr>
+    <tr><td><code>note_delete</code></td><td>id</td><td>메모 삭제, 창 파괴, 목록 제거 이벤트</td><td>직접 호출</td></tr>
+    <tr><td><code>band_set</code> / <code>theme_set</code></td><td>"none|thin|full" / "dark|light"</td><td>전역 설정, 접힌 창 높이 재계산, 모든 창에 이벤트</td><td>전 창 InvalidateRect</td></tr>
+    <tr><td><code>list_get</code>, <code>list_open_note</code>, <code>list_new</code>, <code>list_close</code>, <code>open_list</code></td><td>—</td><td>목록 데이터, 열기/앞으로, 새 메모, 목록 닫기</td><td>직접 호출</td></tr>
+  </tbody>
+</table>
+<p class="small">이벤트 (Rust → 프런트): <code>theme</code>(전 창), <code>band</code>(전 창), <code>list-upsert</code>(목록 창, 메모 1개 요약), <code>list-remove</code>(목록 창, id). v2에서는 IPC 직렬화 계층 전체가 사라지고 같은 스레드의 함수 호출과 <code>InvalidateRect</code>로 대체된다.</p>
+
+<h3 id="s3-4">3.4 기능 목록 (F-01 ~ F-28)</h3>
+<table>
+  <thead><tr><th style="width:6%">ID</th><th style="width:19%">기능</th><th>v1 동작 명세 (현재 구현 기준)</th><th style="width:21%">v1 구현 수단</th></tr></thead>
+  <tbody>
+    <tr><td>F-01</td><td>메모 창</td><td>프레임 없는 독립 창. 기본 260×260, 최소 180×130 (논리 px). 각진 모서리, 검정 1 px 테두리, 그림자 없음</td><td>WebviewWindow, <code>shadow(false)</code>, CSS <code>html::after</code></td></tr>
+    <tr><td>F-02</td><td>띠 모드</td><td>none / thin(4 px) / full(제목 줄 전체 메모 색). 전역 설정, ⋯ 메뉴 한 줄에서 순환</td><td>CSS <code>[data-band]</code></td></tr>
+    <tr><td>F-03</td><td>제목</td><td>한 줄, 기본 읽기 전용. ⋯ → "제목 수정"으로 편집, Enter → 본문으로, Esc/포커스 이탈 → 종료. 빈 경우 회색 "제목"</td><td><code>&lt;input readonly&gt;</code></td></tr>
+    <tr><td>F-04</td><td>본문</td><td>여러 줄 평문, 서식 없음, 붙여넣기 평문. 빈 경우 회색 "메모". 맞춤법 검사 끔</td><td><code>&lt;textarea&gt;</code></td></tr>
+    <tr><td>F-05</td><td>제목 줄 도구</td><td>핀, +, ⋯, × (24×24, 아이콘 14 px). 마우스 오버 또는 창 포커스 시에만 표시</td><td>CSS opacity</td></tr>
+    <tr><td>F-06</td><td>창 이동</td><td>제목 줄·띠·상단 가장자리를 4 px 이상 끌면 네이티브 이동. 상단 가장자리는 크기 조절 대신 이동(모서리는 대각선 조절 유지)</td><td><code>startDragging</code>, 리전 서브클래스</td></tr>
+    <tr><td>F-07</td><td>접기/펴기</td><td>제목 줄 더블클릭. 접힘 높이 = 띠 + 34 px, 펼치면 저장된 높이. 띠 없음일 때 34 px 위해 시스템 최소 높이 낮춤</td><td>set_size, WM_GETMINMAXINFO</td></tr>
+    <tr><td>F-08</td><td>색상</td><td>파스텔 6색 #AFA9EC #F4C0D1 #9FE1CB #F6C9A0 #B5D4F4 #F3E9C6. 새 메모는 순환 배정. ⋯ 메뉴 색 점(현재 색 체크)</td><td><code>nextColor</code></td></tr>
+    <tr><td>F-09</td><td>새 메모</td><td>+ 버튼·Ctrl+N: 현재 창 +28 px. 목록·트레이: 주 모니터 중앙, 8단계 계단식</td><td>new_note_near</td></tr>
+    <tr><td>F-10</td><td>닫기</td><td>× / Ctrl+W / Alt+F4: 창만 닫고 목록 유지. 제목·본문이 모두 공백이면 삭제</td><td>close_note</td></tr>
+    <tr><td>F-11</td><td>삭제</td><td>⋯ → "메모 삭제", 목록 우클릭·Delete. 내용이 있으면 "삭제하시겠습니까?" 카드(유지/삭제, 기본 포커스 유지, Esc=유지)</td><td>DOM 카드</td></tr>
+    <tr><td>F-12</td><td>항상 위</td><td>핀 토글. 켜짐 = 채운 핀</td><td>set_always_on_top</td></tr>
+    <tr><td>F-13</td><td>글자 크기</td><td>Ctrl+휠, 10–32 px, 메모별 저장(<code>fontSize</code>)</td><td>CSS 변수</td></tr>
+    <tr><td>F-14</td><td>테마</td><td>다크/라이트 전역, 즉시 전 창 반영. 창 배경색도 테마에 맞춰 첫 프레임 깜빡임 방지</td><td>이벤트 + background_color</td></tr>
+    <tr><td>F-15</td><td>목록 창</td><td>280×380, 처음엔 주 모니터 우상단. "메모"+개수, +, ×, 검색(제목+본문, 대소문자 무시), 행(색 점·제목/"제목 없음"·첫 줄·"n분 전"), 닫힌 메모 흐리게, 수정순 정렬, ↑↓/Enter/Delete, 빈 문구 2종</td><td>list.*</td></tr>
+    <tr><td>F-16</td><td>트레이</td><td>클릭 = 열린 메모 앞으로(없으면 목록). 메뉴: 새 메모 / 메모 목록 / 자동 실행(체크) / 종료. 툴팁 GaeunMemo</td><td>TrayIconBuilder</td></tr>
+    <tr><td>F-17</td><td>작업표시줄</td><td>아이콘 하나. 클릭 = 앞으로, 이미 앞이면 모두 숨김(토글). 창이 하나도 없으면 아이콘 숨김</td><td>앵커 창 SC_RESTORE 가로채기</td></tr>
+    <tr><td>F-18</td><td>단일 인스턴스</td><td>두 번째 실행 시 기존 인스턴스가 메모를 앞으로</td><td>single-instance 플러그인</td></tr>
+    <tr><td>F-19</td><td>자동 실행</td><td>HKCU Run <code>"…\gaeunmemo.exe" --autostart</code>. 첫 실행 시 켬. 자동 실행 시 포커스 안 뺏음. 옛 StickyMemo 항목 제거</td><td>winreg</td></tr>
+    <tr><td>F-20</td><td>첫 실행</td><td>정말 처음 한 번만 빈 메모를 화면 중앙에 (<code>initialized</code>)</td><td>main.rs</td></tr>
+    <tr><td>F-21</td><td>자동 저장</td><td>입력은 즉시 + 최대 300 ms 간격, 창 위치·크기 1 s. 원자적 쓰기(임시→rename, 실패 시 덮어쓰기), 세션 종료·앱 종료 즉시 저장</td><td>store.rs</td></tr>
+    <tr><td>F-22</td><td>백업·복구</td><td>일일 <code>notes-backup-YYYYMMDD.json</code> 7개 유지. 파싱 실패 시 <code>notes-broken-&lt;시각&gt;.json</code> 복사 후 빈 상태</td><td>store.rs</td></tr>
+    <tr><td>F-23</td><td>모니터 보정</td><td>저장 위치가 연결된 모니터 밖이면 주 모니터 중앙으로</td><td>fit_rect</td></tr>
+    <tr><td>F-24</td><td>가져오기</td><td>첫 실행 시 <code>%APPDATA%\StickyMemo\notes.json</code> 형식 1(동일 구조)·2(배열, 첫 줄=제목). 원본 유지</td><td>import.rs</td></tr>
+    <tr><td>F-25</td><td>메뉴 소형화</td><td>창 높이가 부족하면 ⋯ 메뉴를 위로 붙이고 행 높이 20 px</td><td>CSS <code>.compact</code></td></tr>
+    <tr><td>F-26</td><td>한글 입력</td><td>제목·본문 한글 IME 조합 입력, 조합 중 저장 반영</td><td>Chromium IME</td></tr>
+    <tr><td>F-27</td><td>상태 복원</td><td>재실행 시 위치·크기·접힘·핀·색·글자 크기·열림 상태·목록 창 상태 복원</td><td>notes.json</td></tr>
+    <tr><td>F-28</td><td>컨텍스트 메뉴</td><td>입력란에서만 기본 복사/붙여넣기 메뉴, 그 외 영역은 막음</td><td>ui.js</td></tr>
+  </tbody>
+</table>
+
+<h3>3.5 UI 시각 명세 (v1 실측 CSS 값)</h3>
+<div class="grid2">
+<table>
+  <caption>표 3-4. 색상 토큰</caption>
+  <thead><tr><th style="width:34%">토큰</th><th>라이트</th><th>다크</th></tr></thead>
+  <tbody>
+    <tr><td>paper (바탕)</td><td><code>#FFFFFF</code></td><td><code>#202020</code></td></tr>
+    <tr><td>paper-2 (입력 배경)</td><td><code>#F5F5F3</code></td><td><code>#2A2A2A</code></td></tr>
+    <tr><td>paper-3 (hover)</td><td><code>#EBEBE8</code></td><td><code>#353535</code></td></tr>
+    <tr><td>rule (구분선)</td><td><code>#DDDDD8</code></td><td><code>#474747</code></td></tr>
+    <tr><td>edge (창 테두리)</td><td colspan="2"><code>#000000</code> (양 테마 공통)</td></tr>
+    <tr><td>ink (글자)</td><td><code>#222220</code></td><td><code>#F0F0F0</code></td></tr>
+    <tr><td>muted (보조 글자)</td><td><code>#6B6B67</code></td><td><code>#A6A6A6</code></td></tr>
+    <tr><td>scrim (확인 카드 뒤)</td><td>흰색 78 %</td><td><code>#202020</code> 78 %</td></tr>
+    <tr><td>strong / on-strong</td><td><code>#1A1A18</code> / 흰색</td><td><code>#F0F0F0</code> / <code>#1A1A1A</code></td></tr>
+    <tr><td>on-accent (제목 줄 모드 글자)</td><td colspan="2"><code>#222220</code>, 보조 <code>#4A4A46</code></td></tr>
+    <tr><td>선택 영역</td><td colspan="2">메모 색 65 % + 투명</td></tr>
+  </tbody>
+</table>
+<table>
+  <caption>표 3-5. 치수·글꼴 (CSS px = 논리 px, 150 % 배율에서 ×1.5)</caption>
+  <thead><tr><th style="width:44%">요소</th><th>값</th></tr></thead>
+  <tbody>
+    <tr><td>띠 (thin)</td><td>4 px</td></tr>
+    <tr><td>제목 줄</td><td>34 px, 좌 12 / 우 5 패딩, 간격 4</td></tr>
+    <tr><td>제목 글자</td><td>맑은 고딕 700, 13.5 px, 줄높이 26 px</td></tr>
+    <tr><td>본문 글자</td><td>맑은 고딕 400, 14 px(가변 10–32), 줄높이 1.6, 패딩 4/12/12/12</td></tr>
+    <tr><td>도구 버튼</td><td>24×24, 간격 1, 아이콘 14×14, 선 1.5 (핀 1.3, 둥근 끝)</td></tr>
+    <tr><td>⋯ 메뉴</td><td>최소 폭 156, 행 28 (소형 20), 패딩 4, 글자 13, 1 px 검정 외곽선</td></tr>
+    <tr><td>색 점</td><td>16×16, 간격 6, 체크 10×10 선 2</td></tr>
+    <tr><td>확인 카드</td><td>최대 폭 220, 패딩 12/12/10, 버튼 높이 26, 글자 12.5</td></tr>
+    <tr><td>목록 창</td><td>280×380(최소 220×240), 헤더 40, 검색 30, 행 패딩 7/14, 색 점 8×8</td></tr>
+    <tr><td>목록 행 글자</td><td>제목 13.5/700, 미리보기 12.5, 시각 11.5</td></tr>
+    <tr><td>앱 아이콘</td><td>흰 종이, 라벤더 띠 22 %, 오른쪽 아래 30 % 접힘, 회색 외곽선</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="s3-6">3.6 데이터 구조와 저장 방식</h3>
+<pre>// %APPDATA%\gaeunmemo\notes.json (압축 JSON, UTF-8)
+{
+  "notes": [{
+    "id": "uuid-v4",          // 문자열, 중복/빈 값은 재발급
+    "title": "", "text": "",  // 500자 / 200,000자 상한
+    "color": "#AFA9EC",       // 팔레트 6색 외 값 → 첫 색
+    "pinned": false, "folded": false, "open": true,
+    "bounds": {"x":0,"y":0,"width":260,"height":260}, // 논리 px, null 허용
+    "updatedAt": 0,           // ms epoch, 0 = 알 수 없음
+    "fontSize": 14            // 10..32
+  }],
+  "list": {"open": false, "bounds": null},
+  "settings": {
+    "theme": "dark",          // "dark" | "light"
+    "nextColor": 0,           // 0..5
+    "initialized": false,     // 첫 실행 동작 1회
+    "band": "thin"            // "none"|"thin"|"full", 옛 숫자 0/2/4/8 수용
+  }
+}</pre>
+<div class="grid2">
+<table>
+  <caption>표 3-6. 저장 경로와 보장</caption>
+  <thead><tr><th style="width:36%">경로</th><th>동작</th></tr></thead>
+  <tbody>
+    <tr><td>입력</td><td>EN 1회 입력 → 즉시 쓰기, 이후 최대 300 ms 간격(선행 에지 throttle) <span class="M">측정</span>: 강제 종료 시 손실 ≤ 마지막 0.3 s</td></tr>
+    <tr><td>창 이동·크기</td><td>1 s throttle</td></tr>
+    <tr><td>쓰기 방식</td><td><code>notes.json.tmp</code> 작성 → <code>sync_all</code> → rename. 실패 시 직접 덮어쓰기</td></tr>
+    <tr><td>세션 종료</td><td>앵커 창 <code>WM_QUERYENDSESSION</code>/<code>WM_ENDSESSION</code>에서 동기 flush</td></tr>
+    <tr><td>손상 파일</td><td>복사 백업 후 빈 상태로 시작(<code>initialized=true</code> 유지 → 첫 실행 동작 재실행 방지)</td></tr>
+    <tr><td>일일 백업</td><td>그날 첫 쓰기 전에 복사, 최신 7개 유지</td></tr>
+  </tbody>
+</table>
+<div class="warn"><b>v1 저장 구조의 한계.</b> (1) 한 글자 입력에도 전체 문서(모든 메모)를 다시 직렬화·기록 — 메모 수·크기에 비례하는 쓰기 증폭. (2) 손상 시 자동 복원 없이 빈 상태로 시작(백업은 수동 복원). (3) 무결성 검사 수단 없음(파싱 성공 여부만 확인).</div>
+</div>
+
+<h3>3.7 성능 기준선 (v1, 측정)</h3>
+<p>측정 방법: 메모 N개가 열린 상태의 테스트 데이터로 앱을 실행하고 8 s 대기 후 프로세스 트리(부모-자식 관계로 WebView2 프로세스 포함)를 수집했다. 유휴 CPU는 입력 없는 30 s 동안, 타이핑 CPU는 포커스된 메모에 <code>SendKeys</code>로 200자를 20 ms 간격으로 입력하는 약 10–11 s 동안의 CPU 시간 증가량이다. 측정 스크립트는 부록 A.4. 두 GPU 구성은 같은 소스에서 <code>--disable-gpu --disable-gpu-compositing</code> 인자 유무만 다르게 빌드했다.</p>
+<div class="grid2">
+<table>
+  <caption>표 3-7. 프로세스 종류별 개인 메모리 (MB) <span class="M">측정</span></caption>
+  <thead><tr><th style="width:36%">프로세스</th><th class="num">1개·GPU끔</th><th class="num">10개·GPU끔</th><th class="num">1개·GPU켬</th><th class="num">10개·GPU켬</th></tr></thead>
+  <tbody>
+    <tr><td>app (Rust)</td><td class="num">4.9</td><td class="num">7.3</td><td class="num">4.9</td><td class="num">7.4</td></tr>
+    <tr><td>browser</td><td class="num">31.7</td><td class="num">48.9</td><td class="num">32.0</td><td class="num">49.0</td></tr>
+    <tr><td>renderer (공유)</td><td class="num">28.2</td><td class="num">46.9</td><td class="num">24.6</td><td class="num">46.2</td></tr>
+    <tr><td>gpu-process</td><td class="num">13.3</td><td class="num">15.2</td><td class="num">76.9</td><td class="num">154.2</td></tr>
+    <tr><td>NetworkService</td><td class="num">10.8</td><td class="num">11.4</td><td class="num">10.7</td><td class="num">11.5</td></tr>
+    <tr><td>StorageService</td><td class="num">7.6</td><td class="num">7.7</td><td class="num">7.6</td><td class="num">7.7</td></tr>
+    <tr><td>crashpad</td><td class="num">2.6</td><td class="num">2.6</td><td class="num">2.6</td><td class="num">2.6</td></tr>
+    <tr><td><b>합계</b></td><td class="num"><b>99.1</b></td><td class="num"><b>140.0</b></td><td class="num"><b>159.3</b></td><td class="num"><b>278.6</b></td></tr>
+    <tr><td>앱 GDI / USER 개체</td><td class="num">23 / 33</td><td class="num">59 / 118</td><td class="num">23 / 33</td><td class="num">59 / 118</td></tr>
+    <tr><td>앱 핸들 / 스레드</td><td class="num">344 / 24</td><td class="num">513 / 33</td><td class="num">345 / 24</td><td class="num">514 / 33</td></tr>
+  </tbody>
+</table>
+<div>
+<table>
+  <caption>표 3-8. CPU와 시작 시간 <span class="M">측정</span></caption>
+  <thead><tr><th style="width:40%">지표</th><th class="num">GPU 끔</th><th class="num">GPU 켬</th></tr></thead>
+  <tbody>
+    <tr><td>유휴 CPU, 메모 1개 (% 1코어)</td><td class="num">1.55</td><td class="num">1.75</td></tr>
+    <tr><td>유휴 CPU, 메모 10개</td><td class="num">1.70</td><td class="num">1.44</td></tr>
+    <tr><td>타이핑 CPU, 메모 1개</td><td class="num">28.25</td><td class="num">32.05</td></tr>
+    <tr><td>타이핑 CPU, 메모 10개</td><td class="num">31.46</td><td class="num">35.60</td></tr>
+    <tr><td>창 표시까지, 트레이만 (s)</td><td class="num">0.13–0.31</td><td class="num">—</td></tr>
+    <tr><td>창 표시까지, 메모 1개</td><td class="num">0.11–0.28</td><td class="num">—</td></tr>
+    <tr><td>창 표시까지, 메모 10개</td><td class="num">1.87–2.04</td><td class="num">—</td></tr>
+    <tr><td>설치 직후 첫 실행 (데이터 폴더 생성)</td><td class="num">2.56</td><td class="num">—</td></tr>
+  </tbody>
+</table>
+<div class="note"><b>해석.</b> GPU 끔은 gpu-process 메모리만 줄일 뿐(77→13 MB, 154→15 MB) CPU는 거의 같다. 유휴 CPU 1.5 %의 원인은 측정하지 않았다 <span class="U">미확인</span> — 포커스된 textarea의 캐럿 깜빡임에 따른 Chromium 합성 주기가 유력하나 ETW 추적으로 확인이 필요하다. "창 표시까지"는 HWND가 보이는 시점이며 웹 콘텐츠의 첫 페인트 시점이 아니다.</div>
+</div>
+</div>
+
+<h3>3.8 v1 메모리 최적화 이력 <span class="M">측정</span></h3>
+<table>
+  <thead><tr><th style="width:34%">단계</th><th class="num">프로세스 (10개)</th><th class="num">메모 1개 (MB)</th><th class="num">메모 10개 (MB)</th><th>비고</th></tr></thead>
+  <tbody>
+    <tr><td>초기 (창마다 렌더러, GPU 켬)</td><td class="num">16</td><td class="num">177.9</td><td class="num">468.2</td><td>창 수만큼 renderer 증가</td></tr>
+    <tr><td>+ 렌더러 공유 (<code>--process-per-site</code>, <code>--renderer-process-limit=1</code>)</td><td class="num">7</td><td class="num">172.9–178.2</td><td class="num">268.3–271.5</td><td>렌더러 1개로 고정</td></tr>
+    <tr><td>+ GPU 비활성</td><td class="num">7</td><td class="num">97.2–97.5</td><td class="num">138.1–138.2</td><td><b>v2 지침상 금지</b></td></tr>
+    <tr><td>+ 불필요 Tauri 기능 제거, 목록 부분 갱신</td><td class="num">7</td><td class="num">95.6–97.2</td><td class="num">138.8–143.2</td><td>exe 2.85→2.75 MB, 메모리 변화 없음</td></tr>
+  </tbody>
+</table>
+<p>결론: v1에서 가능한 구조적 최적화는 모두 적용되었고, 남은 약 95 MB(GPU 끔) / 155 MB(GPU 켬)는 WebView2 런타임의 고정비다. 메모리를 한 자릿수 MB로 낮추려면 WebView2 제거 외에 방법이 없다.</p>
+
+<!-- ============================ 4 ============================ -->
+<h2 id="s4"><span class="no">4.</span>Technology Stack Evaluation</h2>
+<h3>4.1 v1 의존성 분석</h3>
+<div class="grid2">
+<table>
+  <thead><tr><th style="width:42%">직접 의존성</th><th>용도</th><th style="width:22%">v2</th></tr></thead>
+  <tbody>
+    <tr><td><code>tauri 2.12.5</code> (wry, tao, muda, tray-icon)</td><td>창·WebView·IPC·트레이·메뉴</td><td>제거</td></tr>
+    <tr><td><code>tauri-plugin-single-instance 2.5.5</code></td><td>단일 인스턴스</td><td>제거 (뮤텍스+메시지)</td></tr>
+    <tr><td><code>serde 1.0.229</code> / <code>serde_json 1.0.154</code></td><td>JSON 직렬화</td><td>유지 (v1 가져오기용)</td></tr>
+    <tr><td><code>uuid 1.29.2</code> (v4)</td><td>메모 id</td><td>유지 또는 <code>CoCreateGuid</code></td></tr>
+    <tr><td><code>windows-sys 0.59.0</code></td><td>앵커 창, 레지스트리 외 Win32</td><td>확대 사용</td></tr>
+    <tr><td><code>winreg 0.55.0</code></td><td>Run 키</td><td>유지 또는 windows-sys</td></tr>
+    <tr><td><code>tauri-build</code> (빌드), <code>tempfile</code> (테스트)</td><td>리소스·아이콘 / 테스트</td><td>→ <code>embed-resource</code> 또는 <code>winres</code></td></tr>
+  </tbody>
+</table>
+<div>
+<p>v1 전이 의존성은 <b>277개 크레이트</b>(cargo tree, normal) <span class="M">측정</span>이며 대부분 Tauri·wry·WebView2 바인딩과 그 빌드 도구에서 온다. 릴리스 exe는 2,888,192 B, 설치 파일 1,081,491 B, 설치 후 2,967,548 B(uninstall.exe 79,356 B 포함) <span class="M">측정</span>. 실행에는 OS의 WebView2 Evergreen 런타임(157.0.4341.46)이 필요하다.</p>
+<p>v2 예상 의존성: <code>windows-sys</code>, <code>serde</code>/<code>serde_json</code>(가져오기), <code>rusqlite</code>, (선택) <code>windows</code>(Direct2D COM 래퍼). 전이 의존성 30개 이하 <span class="E">예상</span>.</p>
+</div>
+</div>
+
+<h3>4.2 UI 기술 후보 평가</h3>
+<table>
+  <thead><tr><th style="width:15%">후보</th><th style="width:9%">런타임</th><th style="width:15%">메모리 (메모 1개)</th><th style="width:13%">한글 IME</th><th style="width:14%">기존 UI 재현</th><th>평가</th></tr></thead>
+  <tbody>
+    <tr><td><b>Win32 + windows-sys</b></td><td>없음</td><td>수 MB <span class="E">예상</span></td><td>EDIT 내장</td><td>직접 그리기 필요</td><td><b>채택.</b> 가장 가볍고 IME·접근성은 OS 컨트롤 제공. 비용: unsafe 코드량, 메시지 처리 직접 구현.</td></tr>
+    <tr><td>windows-rs (<code>windows</code> 크레이트)</td><td>없음</td><td>상동</td><td>상동</td><td>상동</td><td>COM 안전 래퍼가 필요한 Direct2D/DirectWrite 영역에 한해 부분 채택 검토. 컴파일 시간·바이너리 증가.</td></tr>
+    <tr><td>winit + 소프트웨어 렌더러</td><td>없음</td><td>수 MB</td><td>IME 이벤트만 제공, 편집기 직접 구현</td><td>가능</td><td>기각. 텍스트 편집·캐럿·선택·IME 조합 표시를 직접 구현해야 함.</td></tr>
+    <tr><td>egui / iced / Slint</td><td>없음</td><td>10–50 MB <span class="E">예상</span></td><td>부분 지원</td><td>근사 재현</td><td>기각. 즉시 모드/자체 렌더러는 유휴 재그리기·GPU 사용, 네이티브 컨트롤 아님.</td></tr>
+    <tr><td>WinUI 3 / Windows App SDK</td><td>WinAppSDK</td><td>30 MB+ <span class="E">예상</span></td><td>지원</td><td>가능</td><td>기각. 별도 런타임 의존, Rust 바인딩 미성숙.</td></tr>
+    <tr><td>Qt / wxWidgets</td><td>C++ 런타임</td><td>10–30 MB <span class="E">예상</span></td><td>지원</td><td>가능</td><td>기각. 불필요한 프레임워크(지침 금지), 배포 크기 증가.</td></tr>
+  </tbody>
+</table>
+
+<h3>4.3 렌더링·텍스트·저장 기술 평가</h3>
+<table>
+  <thead><tr><th style="width:15%">영역</th><th style="width:20%">후보</th><th>장점</th><th>단점</th><th style="width:16%">결정</th></tr></thead>
+  <tbody>
+    <tr><td rowspan="4">창 외곽 렌더링</td><td>GDI (더블 버퍼)</td><td>추가 DLL 없음, 장치 자원 없음, 사각형·텍스트에 충분</td><td>도형 안티앨리어싱 없음(핀·체크 아이콘 사선 계단)</td><td>기본</td></tr>
+    <tr><td>GDI + 미리 그린 알파 비트맵</td><td>아이콘 품질 확보, CPU 최소 (<code>AlphaBlend</code>)</td><td>DPI별 비트맵 준비 필요</td><td>기본 (아이콘)</td></tr>
+    <tr><td>Direct2D + DirectWrite</td><td>안티앨리어싱, 하드웨어 가속, 고품질 텍스트</td><td>d2d1/dwrite 로드·장치 자원 → 메모리 증가 <span class="E">예상</span>, 장치 손실 처리</td><td>프로토타입 후 결정</td></tr>
+    <tr><td>GDI+</td><td>안티앨리어싱 간편</td><td>별도 초기화, 느린 소프트웨어 경로, 유지보수 모드</td><td>기각</td></tr>
+    <tr><td rowspan="3">본문 편집</td><td>EDIT (<code>ES_MULTILINE</code>)</td><td>최소 메모리, IME·클립보드·스크롤 내장, 평문 전용</td><td>실행 취소 1단계, 선택 색 시스템 고정, 64 KB 기본 한도(EM_SETLIMITTEXT로 확장)</td><td>1안</td></tr>
+    <tr><td>RichEdit (MSFTEDIT, <code>TM_PLAINTEXT</code>)</td><td>다단계 실행 취소, 대용량, 평문 모드</td><td>msftedit.dll 로드로 메모리 증가 <span class="E">예상</span></td><td>2안 (실측 비교)</td></tr>
+    <tr><td>자체 편집기 (TSF 구현)</td><td>완전 제어</td><td>IME(TSF)·접근성·캐럿 직접 구현, 높은 위험</td><td>기각</td></tr>
+    <tr><td rowspan="3">저장</td><td>SQLite (rusqlite, bundled)</td><td>트랜잭션, WAL, 무결성 검사, 온라인 백업, 메모 단위 갱신</td><td>exe +약 1 MB <span class="E">예상</span>, C 컴파일 필요</td><td>채택 (지침)</td></tr>
+    <tr><td>SQLite (OS <code>winsqlite3.dll</code>)</td><td>배포 크기 증가 0, 이 PC에 3.53.4 존재 <span class="M">측정</span></td><td>OS 버전에 묶임, 공식 지원 범위 불명확 <span class="U">미확인</span></td><td>대안 (P0에서 검증)</td></tr>
+    <tr><td>JSON 파일 유지</td><td>의존성 없음, v1 검증 완료</td><td>전체 재작성, 자동 복원 없음</td><td>기각 (가져오기용만)</td></tr>
+  </tbody>
+</table>
+
+<h3>4.4 v1 코드 재사용 계획</h3>
+<table>
+  <thead><tr><th style="width:24%">자산</th><th style="width:12%" class="num">규모</th><th>재사용 방식</th></tr></thead>
+  <tbody>
+    <tr><td><code>model.rs</code> 정규화·기본값</td><td class="num">~180행</td><td>가져오기(JSON→SQLite) 전처리에 그대로 사용. 숫자 띠 값 호환 포함</td></tr>
+    <tr><td><code>import.rs</code></td><td class="num">101행</td><td>StickyMemo 형식 1·2 변환 그대로, 테스트 4개 포함</td></tr>
+    <tr><td><code>autostart.rs</code></td><td class="num">55행</td><td>그대로</td></tr>
+    <tr><td><code>anchor.rs</code> 앵커·세션 종료·최소 높이</td><td class="num">~120행</td><td>작업표시줄 토글, <code>WM_QUERYENDSESSION</code>, <code>WM_GETMINMAXINFO</code> 처리 이식</td></tr>
+    <tr><td><code>windows.rs</code> fit_rect, 계단식 배치</td><td class="num">~60행</td><td>순수 함수, 테스트 3개 포함</td></tr>
+    <tr><td><code>store.rs</code> 저장 스레드 throttle</td><td class="num">~90행</td><td><code>plan_write</code> 로직 유지, 백엔드만 SQLite로</td></tr>
+    <tr><td><code>make_icon.py</code></td><td class="num">81행</td><td>.ico 생성 유지, DPI별 도구 아이콘 비트맵 생성으로 확장</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================ 5 ============================ -->
+<h2 id="s5"><span class="no">5.</span>Architecture Design</h2>
+<h3>5.1 v2 시스템 구성</h3>
+<figure>
+<svg viewBox="0 0 700 330" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="10">
+  <defs><marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#333"/></marker></defs>
+  <rect x="4" y="4" width="692" height="322" fill="#FBFBFA" stroke="#333"/>
+  <text x="14" y="21" font-weight="700" font-size="11">gaeunmemo.exe — 단일 프로세스 (WebView2·Chromium 없음)</text>
+  <rect x="14" y="30" width="450" height="235" fill="#F2F1FB" stroke="#534AB7"/>
+  <text x="24" y="47" font-weight="700">UI 스레드 (GetMessage 루프, 유휴 시 커널 대기)</text>
+  <rect x="24" y="56" width="140" height="56" fill="#fff" stroke="#666"/><text x="31" y="72" font-weight="700">app::App</text><text x="31" y="86" font-size="8.5">상태 소유 (Vec&lt;NoteState&gt;)</text><text x="31" y="99" font-size="8.5">명령 디스패치</text>
+  <rect x="174" y="56" width="135" height="56" fill="#fff" stroke="#666"/><text x="181" y="72" font-weight="700">ui::note</text><text x="181" y="86" font-size="8.5">GM_Note WndProc × N</text><text x="181" y="99" font-size="8.5">EDIT 자식 1~2개</text>
+  <rect x="319" y="56" width="135" height="56" fill="#fff" stroke="#666"/><text x="326" y="72" font-weight="700">ui::list</text><text x="326" y="86" font-size="8.5">GM_List WndProc</text><text x="326" y="99" font-size="8.5">가상 행, 검색 EDIT</text>
+  <rect x="24" y="120" width="140" height="50" fill="#fff" stroke="#666"/><text x="31" y="136" font-weight="700">ui::popup</text><text x="31" y="150" font-size="8.5">⋯ 메뉴 / 확인 카드</text><text x="31" y="162" font-size="8.5">GM_Popup (소유 창)</text>
+  <rect x="174" y="120" width="135" height="50" fill="#fff" stroke="#666"/><text x="181" y="136" font-weight="700">shell::tray / anchor</text><text x="181" y="150" font-size="8.5">Shell_NotifyIcon, 앵커 창</text><text x="181" y="162" font-size="8.5">세션 종료, TaskbarCreated</text>
+  <rect x="319" y="120" width="135" height="50" fill="#fff" stroke="#666"/><text x="326" y="136" font-weight="700">render</text><text x="326" y="150" font-size="8.5">GDI 자원 캐시 (테마×DPI)</text><text x="326" y="162" font-size="8.5">[선택] D2D 팩터리</text>
+  <rect x="24" y="178" width="140" height="44" fill="#fff" stroke="#666"/><text x="31" y="194" font-weight="700">platform</text><text x="31" y="208" font-size="8.5">DPI, 모니터, DWM, 단일 인스턴스</text>
+  <rect x="174" y="178" width="135" height="44" fill="#fff" stroke="#666"/><text x="181" y="194" font-weight="700">autostart</text><text x="181" y="208" font-size="8.5">HKCU Run (v1 재사용)</text>
+  <rect x="319" y="178" width="135" height="44" fill="#fff" stroke="#666"/><text x="326" y="194" font-weight="700">model</text><text x="326" y="208" font-size="8.5">Note, Settings, 검증 (v1)</text>
+  <text x="24" y="250" font-size="8.5">모든 HWND·GDI 객체는 이 스레드만 접근. 잠금 없음. 다른 스레드와는 메시지(PostMessage)로만 통신.</text>
+  <rect x="490" y="30" width="196" height="150" fill="#EEF7F2" stroke="#1D9E75"/>
+  <text x="500" y="47" font-weight="700">저장 스레드</text>
+  <rect x="500" y="56" width="176" height="40" fill="#fff" stroke="#666"/><text x="507" y="72" font-weight="700">store::Writer</text><text x="507" y="86" font-size="8.5">mpsc 수신, throttle (v1 plan_write)</text>
+  <rect x="500" y="104" width="176" height="40" fill="#fff" stroke="#666"/><text x="507" y="120" font-weight="700">rusqlite::Connection</text><text x="507" y="134" font-size="8.5">WAL, synchronous=FULL</text>
+  <text x="500" y="164" font-size="8.5">일일 백업 (VACUUM INTO), 무결성 검사</text>
+  <rect x="490" y="195" width="196" height="70" fill="#fff" stroke="#888"/>
+  <text x="500" y="212" font-weight="700">%APPDATA%\gaeunmemo\</text>
+  <text x="500" y="227" font-size="8.5">gaeunmemo.db (+ -wal, -shm)</text>
+  <text x="500" y="241" font-size="8.5">backup\gaeunmemo-YYYYMMDD.db × 7</text>
+  <text x="500" y="255" font-size="8.5">notes.json (v1, 읽기 전용 보존)</text>
+  <line x1="464" y1="90" x2="498" y2="76" stroke="#333" marker-end="url(#b)"/>
+  <line x1="498" y1="160" x2="466" y2="200" stroke="#1D9E75" stroke-dasharray="3 2" marker-end="url(#b)"/>
+  <line x1="588" y1="144" x2="588" y2="193" stroke="#333" marker-end="url(#b)"/>
+  <rect x="14" y="275" width="672" height="44" fill="#fff" stroke="#888"/>
+  <text x="24" y="291" font-weight="700">OS 구성요소 (프로세스 내 DLL)</text>
+  <text x="24" y="307" font-size="8.5">user32 · gdi32 · comctl32 v6 (EDIT, 비주얼 스타일) · imm32 (IME) · shell32 (트레이) · dwmapi · uxtheme (다크 스크롤바) · [선택] d2d1 · dwrite · msftedit</text>
+</svg>
+<figcaption>그림 5-1. v2 단일 프로세스 아키텍처 — UI 스레드 1개, 저장 스레드 1개, 외부 런타임 없음. 실선 화살표 = <code>StoreCmd</code> 전송, 녹색 점선 = 저장 오류 통지(<code>WM_APP_STORE</code>)</figcaption>
+</figure>
+
+<h3>5.2 프로세스·스레드 모델과 근거</h3>
+<div class="grid2">
+<div class="dec"><b class="t">결정 A-1. 단일 프로세스, 단일 UI 스레드.</b> 모든 메모 창·목록 창·팝업·앵커·트레이는 하나의 UI 스레드가 소유한다. Win32에서 창은 생성한 스레드의 메시지 큐에 묶이므로, 한 스레드로 두면 창 간 상태 공유에 잠금이 필요 없다. <i>대안:</i> 창마다 스레드 — 창 간 Z순서·포커스 동기화가 복잡해지고 스레드당 스택 1 MB 예약(커밋은 작음)이 생겨 이득이 없다.</div>
+<div class="dec"><b class="t">결정 A-2. 저장은 전용 스레드.</b> SQLite 커밋은 <code>synchronous=FULL</code>에서 fsync를 동반하므로 수 ms 이상 걸릴 수 있다 <span class="E">예상</span>. UI 스레드는 변경 내용을 값(소유 데이터)으로 복사해 채널로 보내고 즉시 복귀한다. <i>대안:</i> UI 스레드 동기 쓰기 — 지침 9 위반, 디스크 지연이 입력 지연으로 전파.</div>
+</div>
+
+<h3>5.3 모듈 책임과 인터페이스</h3>
+<table>
+  <thead><tr><th style="width:15%">모듈</th><th style="width:30%">책임</th><th>주요 인터페이스 (Rust 시그니처 초안)</th></tr></thead>
+  <tbody>
+    <tr><td><code>app</code></td><td>상태 단일 소유자, 명령 처리, 창 레지스트리</td><td><code>fn new_note(&amp;mut self, at: Option&lt;Point&gt;, focus: bool) -&gt; NoteId</code> · <code>fn close_note(&amp;mut self, id)</code> · <code>fn delete_note(&amp;mut self, id)</code> · <code>fn set_theme/set_band(..)</code> · <code>fn show_all(focus)</code> · <code>fn hide_all()</code></td></tr>
+    <tr><td><code>ui::note</code></td><td>메모 창 생성·WndProc·그리기·히트 테스트·EDIT 관리</td><td><code>fn create(app: &amp;App, n: &amp;NoteState, focus: bool) -&gt; HWND</code> · <code>extern "system" fn wndproc(..)</code> · <code>fn relayout(hwnd)</code></td></tr>
+    <tr><td><code>ui::list</code></td><td>목록 창, 검색 필터, 행 그리기, 키보드</td><td><code>fn upsert(&amp;mut self, s: &amp;Summary)</code> · <code>fn remove(id)</code> · <code>fn filter(&amp;mut self, q: &amp;str)</code></td></tr>
+    <tr><td><code>ui::popup</code></td><td>⋯ 메뉴, 삭제 확인 카드, 목록 우클릭 메뉴</td><td><code>fn show_menu(owner: HWND, anchor: RECT, items: &amp;[MenuItem]) -&gt; Option&lt;Action&gt;</code> · <code>fn confirm_delete(owner) -&gt; bool</code> (모달 루프)</td></tr>
+    <tr><td><code>render</code></td><td>테마·DPI별 GDI 자원 캐시, 그리기 원시 함수</td><td><code>struct Palette</code>, <code>fn font(kind, dpi) -&gt; HFONT</code>, <code>fn brush(token) -&gt; HBRUSH</code>, <code>fn icon(kind, dpi, color) -&gt; &amp;AlphaBitmap</code></td></tr>
+    <tr><td><code>shell</code></td><td>트레이, 앵커 창, 세션 종료, 단일 인스턴스</td><td><code>fn tray_add/update/remove</code>, <code>fn anchor_set_visible(bool)</code>, <code>fn signal_existing_instance() -&gt; bool</code></td></tr>
+    <tr><td><code>store</code></td><td>저장 스레드, SQLite 스키마, 백업·복구, v1 가져오기</td><td><code>enum StoreCmd { UpsertNote(NoteRow), DeleteNote(Id), Settings(..), Window(..), Flush(SyncSender&lt;()&gt;) }</code> · <code>fn open_or_recover(path) -&gt; Result&lt;(Db, Recovery)&gt;</code></td></tr>
+    <tr><td><code>platform</code></td><td>DPI 변환, 모니터 열거, DWM 속성, 레지스트리</td><td><code>fn scale(px: f32, dpi: u32) -&gt; i32</code>, <code>fn fit_rect(..)</code>(v1), <code>fn set_corner_square(hwnd)</code></td></tr>
+  </tbody>
+</table>
+
+<h3>5.4 데이터 흐름 — 한 글자 입력부터 디스크까지</h3>
+<figure>
+<svg viewBox="0 0 700 120" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="9.5">
+  <defs><marker id="c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#333"/></marker></defs>
+  <g>
+  <rect x="5" y="20" width="95" height="50" fill="#fff" stroke="#555"/><text x="12" y="38">키 입력 / IME</text><text x="12" y="53" font-size="8">WM_CHAR, WM_IME_*</text><text x="12" y="65" font-size="8">→ EDIT 자체 처리</text>
+  <rect x="120" y="20" width="105" height="50" fill="#fff" stroke="#555"/><text x="127" y="38">EN_CHANGE</text><text x="127" y="53" font-size="8">부모 WM_COMMAND</text><text x="127" y="65" font-size="8">GetWindowTextW</text>
+  <rect x="245" y="20" width="110" height="50" fill="#fff" stroke="#555"/><text x="252" y="38">App::on_edit</text><text x="252" y="53" font-size="8">상태 갱신, updated_at</text><text x="252" y="65" font-size="8">목록 행 1개 무효화</text>
+  <rect x="375" y="20" width="105" height="50" fill="#fff" stroke="#555"/><text x="382" y="38">mpsc::send</text><text x="382" y="53" font-size="8">UpsertNote(행 복사)</text><text x="382" y="65" font-size="8">UI 즉시 복귀</text>
+  <rect x="500" y="20" width="90" height="50" fill="#EEF7F2" stroke="#1D9E75"/><text x="507" y="38">Writer</text><text x="507" y="53" font-size="8">throttle 300 ms</text><text x="507" y="65" font-size="8">id별 최신만 병합</text>
+  <rect x="610" y="20" width="85" height="50" fill="#EEF7F2" stroke="#1D9E75"/><text x="617" y="38">SQLite</text><text x="617" y="53" font-size="8">UPSERT 1행</text><text x="617" y="65" font-size="8">COMMIT (fsync)</text>
+  </g>
+  <g stroke="#333" marker-end="url(#c)"><line x1="100" y1="45" x2="118" y2="45"/><line x1="225" y1="45" x2="243" y2="45"/><line x1="355" y1="45" x2="373" y2="45"/><line x1="480" y1="45" x2="498" y2="45"/><line x1="590" y1="45" x2="608" y2="45"/></g>
+  <text x="5" y="95" font-size="8.5">UI 스레드 구간(왼쪽 4단계)은 파일 I/O 없음. 저장 스레드는 같은 메모의 연속 변경을 마지막 값 하나로 합쳐(coalescing) 쓰기 횟수를 메모 수와 무관하게 초당 최대 약 3.3회로 제한한다.</text>
+  <text x="5" y="110" font-size="8.5">v1과 달리 한 번의 커밋은 바뀐 메모 1행만 기록 → 쓰기 크기가 전체 메모 수에 비례하지 않음.</text>
+</svg>
+<figcaption>그림 5-2. 입력 → 저장 파이프라인</figcaption>
+</figure>
+
+<!-- ============================ 6 ============================ -->
+<h2 id="s6"><span class="no">6.</span>Windows Native Implementation</h2>
+<h3>6.1 창 클래스</h3>
+<table>
+  <thead><tr><th style="width:14%">클래스</th><th style="width:30%">스타일 / 확장 스타일</th><th>역할과 근거</th></tr></thead>
+  <tbody>
+    <tr><td><code>GM_Note</code></td><td><code>WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN</code> / <code>WS_EX_TOOLWINDOW</code> (+ 핀: <code>WS_EX_TOPMOST</code>)</td><td>메모 창. <code>WS_THICKFRAME</code>으로 OS 크기 조절·스냅을 쓰되 <code>WM_NCCALCSIZE</code>에서 비클라이언트 영역을 0으로 만들어 프레임 없는 모양 유지. <code>WS_EX_TOOLWINDOW</code>로 작업표시줄·Alt+Tab 제외(F-17). <code>CS_DBLCLKS</code> 불필요(비클라이언트 더블클릭 사용).</td></tr>
+    <tr><td><code>GM_List</code></td><td>상동</td><td>목록 창. 같은 프레임 처리 코드 공유.</td></tr>
+    <tr><td><code>GM_Popup</code></td><td><code>WS_POPUP</code> / <code>WS_EX_TOOLWINDOW | WS_EX_TOPMOST</code>, 소유 창 = 메모</td><td>⋯ 메뉴. 소유 창으로 두면 메모와 함께 숨김·Z순서 유지. 메모 창 경계를 벗어나도 잘리지 않음(v1의 F-25 소형화 필요성 해소 — 단 동작 호환을 위해 위치 규칙은 유지).</td></tr>
+    <tr><td><code>GM_Anchor</code></td><td><code>WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX</code> / <code>WS_EX_APPWINDOW</code></td><td>v1 그대로. 항상 최소화, <code>SC_RESTORE</code> 가로채 토글. 창이 없으면 <code>SW_HIDE</code>.</td></tr>
+    <tr><td><code>GM_Msg</code></td><td>메시지 전용 창 (<code>HWND_MESSAGE</code>)</td><td>트레이 콜백, 단일 인스턴스 <code>WM_COPYDATA</code>, 저장 스레드 알림 수신. 메시지 전용 창은 브로드캐스트를 못 받으므로 <code>TaskbarCreated</code>와 세션 종료는 앵커 창이 받는다.</td></tr>
+    <tr><td><code>EDIT</code> (자식)</td><td><code>WS_CHILD|ES_MULTILINE|ES_AUTOVSCROLL|ES_WANTRETURN|ES_NOHIDESEL|WS_VSCROLL</code></td><td>본문. 제목은 <code>ES_AUTOHSCROLL</code> 단일 줄 EDIT를 이름 변경 중에만 생성(평소엔 GDI로 그린 텍스트 → 창 이동 히트 영역 확보).</td></tr>
+  </tbody>
+</table>
+
+<h3>6.2 프레임 없는 창의 히트 테스트</h3>
+<div class="grid2">
+<figure>
+<svg viewBox="0 0 340 250" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="9">
+  <rect x="40" y="20" width="260" height="210" fill="#fff" stroke="#000"/>
+  <rect x="40" y="20" width="260" height="4" fill="#AFA9EC"/>
+  <rect x="40" y="24" width="260" height="34" fill="#F2F1FB"/>
+  <text x="52" y="45" font-weight="700">제목 (HTCAPTION)</text>
+  <g fill="#EBEBE8" stroke="#999"><rect x="196" y="29" width="24" height="24"/><rect x="221" y="29" width="24" height="24"/><rect x="246" y="29" width="24" height="24"/><rect x="271" y="29" width="24" height="24"/></g>
+  <text x="203" y="45" font-size="8">핀</text><text x="230" y="45" font-size="8">+</text><text x="254" y="45" font-size="8">⋯</text><text x="279" y="45" font-size="8">×</text>
+  <text x="200" y="70" font-size="8">HTCLIENT (도구 버튼)</text>
+  <rect x="40" y="58" width="260" height="172" fill="none" stroke="#1D9E75" stroke-dasharray="4 2"/>
+  <text x="120" y="150" fill="#1D9E75">EDIT 자식 (HTCLIENT)</text>
+  <g fill="#D85A30" opacity="0.55"><rect x="40" y="20" width="8" height="210"/><rect x="292" y="20" width="8" height="210"/><rect x="40" y="222" width="260" height="8"/><rect x="40" y="20" width="16" height="4"/><rect x="284" y="20" width="16" height="4"/></g>
+  <text x="4" y="125" font-size="8" fill="#D85A30">HTLEFT</text><text x="302" y="125" font-size="8" fill="#D85A30">HTRIGHT</text>
+  <text x="140" y="245" font-size="8" fill="#D85A30">HTBOTTOM / HTBOTTOMLEFT·RIGHT</text>
+  <text x="60" y="14" font-size="8">상단 가운데 = HTCAPTION (v1 F-06), 상단 모서리 = HTTOPLEFT/RIGHT</text>
+</svg>
+<figcaption>그림 6-1. <code>WM_NCHITTEST</code> 영역 (테두리 폭 = <code>GetSystemMetricsForDpi(SM_CXFRAME)</code>)</figcaption>
+</figure>
+<div>
+<ul class="small">
+  <li><b>이동:</b> 제목 줄·띠·상단 가장자리에서 <code>HTCAPTION</code> 반환 → OS가 모달 이동 루프 수행. 마우스 이동마다 앱 코드가 실행되지 않음(v1의 IPC 0회 원칙 유지·강화).</li>
+  <li><b>4 px 임계:</b> v1은 클릭과 끌기를 구분하려고 4 px 임계를 두었다. v2에서는 제목 클릭 편집이 없어졌으므로 <code>HTCAPTION</code> 즉시 이동이 동등하다. OS는 <code>SM_CXDRAG</code>(기본 4 px) 이동 전까지 이동을 시작하지 않는다 <span class="U">미확인</span> — P1에서 확인.</li>
+  <li><b>더블클릭 접기:</b> <code>WM_NCLBUTTONDBLCLK</code>(HTCAPTION)를 가로채 접기 토글, <code>DefWindowProc</code>의 최대화를 막음. 추가로 <code>WS_MAXIMIZEBOX</code> 미사용.</li>
+  <li><b>스냅 레이아웃:</b> <code>WS_THICKFRAME</code>으로 Aero Snap이 동작할 수 있음. v1에는 없던 동작이므로 <code>WM_WINDOWPOSCHANGING</code>에서 최대화 크기를 막고 스냅 허용 여부는 P1에서 결정.</li>
+  <li><b>최소 크기:</b> <code>WM_GETMINMAXINFO</code>로 180×130(펼침) / 폭 180, 높이 = 접힘 높이(접힘). 띠 없음(34 px)을 위해 <code>ptMinTrackSize.y</code>를 시스템 최소 이하로(v1 기법).</li>
+  <li><b>모서리:</b> Windows 11에서 <code>DwmSetWindowAttribute(DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND)</code>로 각진 모서리, 그림자 없음 확인 필요 <span class="U">미확인</span>.</li>
+</ul>
+</div>
+</div>
+
+<h3 id="s6-3">6.3 Windows 메시지 처리 표</h3>
+<table>
+  <thead><tr><th style="width:21%">메시지</th><th style="width:11%">대상</th><th>처리</th></tr></thead>
+  <tbody>
+    <tr><td><code>WM_NCCREATE</code> / <code>WM_CREATE</code></td><td>Note, List</td><td><code>GWLP_USERDATA</code>에 창 상태 포인터 저장, DWM 속성, 자식 EDIT 생성, 글꼴 설정(<code>WM_SETFONT</code>)</td></tr>
+    <tr><td><code>WM_NCCALCSIZE</code> (wParam=TRUE)</td><td>Note, List</td><td>0 반환 → 클라이언트 = 창 전체 (프레임 제거)</td></tr>
+    <tr><td><code>WM_NCHITTEST</code></td><td>Note, List</td><td>그림 6-1 규칙. 도구 버튼·EDIT은 <code>HTCLIENT</code></td></tr>
+    <tr><td><code>WM_NCLBUTTONDBLCLK</code></td><td>Note</td><td><code>HTCAPTION</code>이면 접기 토글 후 0 반환</td></tr>
+    <tr><td><code>WM_ERASEBKGND</code></td><td>전체</td><td>1 반환 (깜빡임 방지, 배경은 <code>WM_PAINT</code>에서)</td></tr>
+    <tr><td><code>WM_PAINT</code></td><td>Note, List, Popup</td><td><code>BeginPaint</code> → 무효 영역만 메모리 DC에 그림 → <code>BitBlt</code>. 띠/제목 줄/도구/테두리. 본문은 EDIT이 그림</td></tr>
+    <tr><td><code>WM_CTLCOLOREDIT</code> / <code>WM_CTLCOLORSTATIC</code></td><td>Note, List</td><td>테마 글자색·배경색 지정, 캐시된 <code>HBRUSH</code> 반환</td></tr>
+    <tr><td><code>WM_COMMAND</code> (<code>EN_CHANGE</code>, <code>EN_KILLFOCUS</code>)</td><td>Note, List</td><td>본문/제목 변경 → App::on_edit, 검색어 변경 → 필터. 이름 변경 EDIT 포커스 상실 → 확정</td></tr>
+    <tr><td><code>WM_MOUSEMOVE</code> / <code>WM_MOUSELEAVE</code></td><td>Note</td><td><code>TrackMouseEvent(TME_LEAVE)</code>로 hover 추적 → 도구 표시/숨김, 버튼 hover 상태. 바뀐 버튼 사각형만 무효화</td></tr>
+    <tr><td><code>WM_LBUTTONDOWN</code> / <code>UP</code></td><td>Note, List</td><td>도구 버튼 눌림(<code>SetCapture</code>) 및 클릭 판정, 목록 행 선택</td></tr>
+    <tr><td><code>WM_ACTIVATE</code> / <code>WM_SETFOCUS</code></td><td>Note</td><td>포커스 상태 → 도구 표시, 마지막 비활성 시각 기록(작업표시줄 토글 판정, v1 <code>last_blur</code>)</td></tr>
+    <tr><td><code>WM_MOUSEWHEEL</code> + <code>MK_CONTROL</code></td><td>EDIT 서브클래스</td><td>글자 크기 ±1 (10–32), 글꼴 교체, 저장 예약</td></tr>
+    <tr><td><code>WM_KEYDOWN</code> (가속기)</td><td>메시지 루프</td><td><code>TranslateAcceleratorW</code>: Ctrl+N, Ctrl+W. 제목 EDIT의 Enter/Esc는 EDIT 서브클래스에서</td></tr>
+    <tr><td><code>WM_MOVE</code>/<code>WM_SIZE</code>, <code>WM_EXITSIZEMOVE</code></td><td>Note, List</td><td>이동·크기 중에는 상태만 갱신, <b>저장은 <code>WM_EXITSIZEMOVE</code>에서 1회</b>(v1의 1 s throttle 대체)</td></tr>
+    <tr><td><code>WM_GETMINMAXINFO</code></td><td>Note, List</td><td>최소/최대 추적 크기(6.2절)</td></tr>
+    <tr><td><code>WM_DPICHANGED</code></td><td>전체</td><td>제안 사각형 적용, DPI별 글꼴·아이콘 교체, 재배치</td></tr>
+    <tr><td><code>WM_CLOSE</code></td><td>Note, List</td><td>F-10 규칙(빈 메모 삭제 / 창만 닫기) 후 <code>DestroyWindow</code></td></tr>
+    <tr><td><code>WM_DESTROY</code> / <code>WM_NCDESTROY</code></td><td>전체</td><td>상태 해제, 마지막 창이면 앵커 숨김(F-17). 메시지 루프는 종료하지 않음(트레이 상주)</td></tr>
+    <tr><td><code>WM_SYSCOMMAND</code> (<code>SC_RESTORE/SC_CLOSE</code>)</td><td>Anchor</td><td>v1 그대로: 토글 / 종료</td></tr>
+    <tr><td><code>WM_QUERYENDSESSION</code> / <code>WM_ENDSESSION</code></td><td>Anchor</td><td><code>StoreCmd::Flush</code> 동기 대기(제한 시간 2 s <span class="T">목표</span>) 후 TRUE</td></tr>
+    <tr><td><code>WM_APP_TRAY</code> (콜백)</td><td>Msg</td><td><code>NIN_SELECT</code>/<code>WM_LBUTTONUP</code> → show_all, <code>WM_CONTEXTMENU</code> → <code>TrackPopupMenu</code>(SetForegroundWindow 선행)</td></tr>
+    <tr><td><code>RegisterWindowMessage("TaskbarCreated")</code></td><td>Anchor</td><td>탐색기 재시작 시 트레이 아이콘 재등록</td></tr>
+    <tr><td><code>WM_COPYDATA</code></td><td>Msg</td><td>두 번째 인스턴스의 활성화 요청(F-18) → show_all</td></tr>
+    <tr><td><code>WM_APP_STORE</code></td><td>Msg</td><td>저장 스레드 오류 통지 → 트레이 풍선 알림, 재시도</td></tr>
+    <tr><td><code>WM_SETTINGCHANGE</code> / <code>WM_THEMECHANGED</code></td><td>전체</td><td>시스템 메트릭·고대비 변경 시 자원 재생성</td></tr>
+  </tbody>
+</table>
+
+<h3>6.4 본문 편집과 한글 IME</h3>
+<div class="grid2">
+<div>
+<p><b>EDIT 우선(지침 7).</b> 표준 EDIT은 IMM32를 통해 한글 조합을 스스로 처리하므로 앱이 <code>WM_IME_*</code>를 직접 다룰 필요가 없다. 조합 중 문자도 EDIT 버퍼에 반영되어 <code>EN_CHANGE</code>가 발생하는지는 P2에서 확인한다 <span class="U">미확인</span> — v1(F-26)은 조합 중 입력도 저장에 반영되었으므로 동등성이 합격 기준이다.</p>
+<p><b>평문 보장:</b> EDIT은 서식을 갖지 않으므로 붙여넣기가 항상 평문이다(F-04). 줄바꿈은 EDIT 내부 CRLF → 저장 시 LF로 정규화, 읽을 때 CRLF로 복원(v1 데이터 호환).</p>
+<p><b>용량:</b> <code>EM_SETLIMITTEXT(200000)</code>로 v1 상한과 일치. 제목은 500자.</p>
+</div>
+<table>
+  <caption>표 6-2. EDIT 대 RichEdit 차이 (P2 실측 항목)</caption>
+  <thead><tr><th style="width:32%">항목</th><th>EDIT</th><th>RichEdit 평문</th></tr></thead>
+  <tbody>
+    <tr><td>실행 취소</td><td>1단계 (v1 textarea는 다단계 → 기능 차이)</td><td><code>EM_SETUNDOLIMIT</code> 다단계</td></tr>
+    <tr><td>선택 영역 색</td><td>시스템 강조색 고정</td><td>시스템 고정 (사용자 지정 어려움)</td></tr>
+    <tr><td>캐럿 색</td><td><code>CreateCaret</code>에 비트맵 지정으로 가능 (서브클래스)</td><td>상동</td></tr>
+    <tr><td>메모리 증분</td><td>측정 예정 <span class="U">미확인</span></td><td>측정 예정 <span class="U">미확인</span></td></tr>
+    <tr><td>IME</td><td>IMM32</td><td>TSF 지원</td></tr>
+    <tr><td>Ctrl+A 전체 선택</td><td>comctl32 v6에서 지원 여부 확인 <span class="U">미확인</span></td><td>지원</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h3>6.5 셸 통합</h3>
+<table>
+  <thead><tr><th style="width:17%">기능</th><th style="width:38%">API</th><th>세부</th></tr></thead>
+  <tbody>
+    <tr><td>트레이 (F-16)</td><td><code>Shell_NotifyIconW(NIM_ADD/NIM_SETVERSION 4/NIM_MODIFY/NIM_DELETE)</code></td><td>아이콘 16/20/24/32 ICO, 툴팁 "GaeunMemo", <code>guidItem</code> 고정 GUID로 위치 유지. 메뉴는 <code>CreatePopupMenu</code> + <code>MF_CHECKED</code>(자동 실행)</td></tr>
+    <tr><td>작업표시줄 (F-17)</td><td>앵커 창 (v1 이식)</td><td>노트 창은 <code>WS_EX_TOOLWINDOW</code>. 앵커 표시 = 창 수 &gt; 0</td></tr>
+    <tr><td>단일 인스턴스 (F-18)</td><td><code>CreateMutexW("Local\\gaeunmemo-{GUID}")</code>, <code>FindWindowExW(HWND_MESSAGE, …)</code>, <code>WM_COPYDATA</code></td><td>뮤텍스 획득 실패 → 기존 메시지 창에 활성화 요청 후 종료. 기존 창에 <code>AllowSetForegroundWindow</code> 허용</td></tr>
+    <tr><td>자동 실행 (F-19)</td><td><code>RegSetValueExW</code> (HKCU Run)</td><td>v1 <code>autostart.rs</code> 그대로. 값 이름 "gaeunmemo" 유지로 v1 항목을 덮어씀</td></tr>
+    <tr><td>포커스 미탈취</td><td><code>ShowWindow(SW_SHOWNOACTIVATE)</code></td><td><code>--autostart</code>일 때</td></tr>
+    <tr><td>DPI</td><td>매니페스트 <code>PerMonitorV2</code>, <code>GetDpiForWindow</code></td><td>저장 좌표는 v1과 동일한 논리 px(96 DPI 기준) 유지</td></tr>
+    <tr><td>다크 스크롤바</td><td><code>SetWindowTheme(edit, L"DarkMode_Explorer", NULL)</code></td><td>문서화되지 않은 테마 이름 — 실패 시 기본 스크롤바 <span class="U">미확인</span></td></tr>
+  </tbody>
+</table>
+
+<h3>6.6 그리기 구조</h3>
+<p>창마다 클라이언트 크기의 메모리 DC 비트맵을 <b>상시 보관하지 않는다</b>. <code>WM_PAINT</code> 동안만 무효 영역 크기의 호환 비트맵을 만들고 해제하거나, UI 스레드 공용 백버퍼(최대 창 크기) 1개를 재사용한다(13.4절 실측 비교 항목). 글꼴·브러시·펜은 (테마, DPI) 조합별로 1벌만 만들어 모든 창이 공유하며, 창 수에 비례하는 GDI 개체는 창 DC와 EDIT 자체뿐이 되도록 한다. 아이콘(핀 2상태, +, ⋯, ×, 체크)은 DPI별 32bpp 프리멀티플라이드 비트맵을 실행 시 1회 래스터화해 <code>AlphaBlend</code>로 그린다.</p>
+
+<h3 id="s6-7">6.7 GDI / Direct2D 프로토타입 설계</h3>
+<table>
+  <thead><tr><th style="width:12%">ID</th><th style="width:28%">구성</th><th>목적</th></tr></thead>
+  <tbody>
+    <tr><td>PT-A</td><td>GDI 크롬 + 알파 비트맵 아이콘 + EDIT</td><td>기준안. 최소 메모리 확인</td></tr>
+    <tr><td>PT-B</td><td>Direct2D(HwndRenderTarget, 하드웨어) + DirectWrite 크롬 + EDIT</td><td>안티앨리어싱 품질 대비 메모리·CPU 비용</td></tr>
+    <tr><td>PT-B'</td><td>Direct2D DCRenderTarget(GDI DC에 바인딩) 공유 1개</td><td>창별 장치 자원 없이 D2D 품질 확보 가능성</td></tr>
+    <tr><td>PT-C</td><td>PT-A + RichEdit 평문 본문</td><td>다단계 실행 취소 비용</td></tr>
+  </tbody>
+</table>
+<div class="grid2">
+<div>
+<h4>공통 시나리오</h4>
+<ol class="small">
+  <li>콜드 시작 → 메모 1/10/50개 표시 (시작 시간, 메모리)</li>
+  <li>유휴 60 s, 포커스된 메모 1개 (CPU, 깨어남 횟수)</li>
+  <li>한글 1,000자 입력 (CPU, 입력 지연 p95)</li>
+  <li>창 끌기 10 s, 크기 조절 10 s (CPU, WM_PAINT 시간)</li>
+  <li>테마 전환·띠 모드 순환 10회 (전 창 재그리기 시간)</li>
+  <li>DPI 100→150→200 % 이동 (재배치 정확성)</li>
+  <li>메모 50개 생성·삭제 1,000회 반복 (GDI/USER/핸들 누수)</li>
+</ol>
+</div>
+<div>
+<h4>측정 도구와 판정</h4>
+<ul class="small">
+  <li>메모리: <code>GetProcessMemoryInfo</code>(PrivateUsage, WorkingSet), 1 s 간격 샘플.</li>
+  <li>CPU: 프로세스 CPU 시간 증가량, 깨어남은 WPR/WPA(CPU Usage Precise).</li>
+  <li>그리기: <code>QueryPerformanceCounter</code>로 <code>WM_PAINT</code> 구간 계측(빌드 기능 플래그).</li>
+  <li>자원: <code>GetGuiResources(GR_GDIOBJECTS/GR_USEROBJECTS)</code>, 핸들 수.</li>
+  <li><b>판정 규칙:</b> PT-B는 PT-A 대비 메모 10개 개인 메모리 +3 MB 이하, 유휴 CPU 동일, 시각 검토 통과일 때만 채택. 그렇지 않으면 PT-A + 아이콘 비트맵 확정.</li>
+  <li><b>GPU 정책:</b> PT-B는 하드웨어 렌더 타깃 기본, 실패·장치 손실 시 WARP 대체. 메모리를 이유로 GPU를 강제로 끄지 않는다(지침).</li>
+</ul>
+</div>
+</div>
+
+<!-- ============================ 7 ============================ -->
+<h2 id="s7"><span class="no">7.</span>UI/UX Reconstruction</h2>
+<h3>7.1 메모 창 배치 명세 (논리 px, 96 DPI 기준)</h3>
+<figure>
+<svg viewBox="0 0 700 270" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="9">
+  <g transform="translate(10,10)">
+    <rect x="0" y="0" width="260" height="250" fill="#fff" stroke="#000"/>
+    <rect x="0" y="0" width="260" height="4" fill="#B5D4F4"/>
+    <text x="12" y="25" font-weight="700" font-size="11">Groceries</text>
+    <g fill="none" stroke="#6B6B67" stroke-width="1.3" stroke-linecap="round"><path d="M164 15l5 5-2.5.8-2.7 2.7.3 2.7-1.3 1.3-6.3-6.3 1.3-1.3 2.7.3 2.7-2.7z"/><path d="M161 25l-4.3 4.3"/></g>
+    <g stroke="#6B6B67" stroke-width="1.5"><path d="M193 13v12M187 19h12"/><path d="M237 13l10 10M247 13l-10 10"/></g>
+    <g fill="#6B6B67"><rect x="211" y="18" width="2" height="2"/><rect x="215" y="18" width="2" height="2"/><rect x="219" y="18" width="2" height="2"/></g>
+    <text x="12" y="56" font-size="10">brand new</text><text x="12" y="74" font-size="10">after enter</text>
+  </g>
+  <g font-size="8.5" fill="#534AB7">
+    <line x1="280" y1="10" x2="280" y2="14" stroke="#534AB7"/><text x="285" y="14">띠 4 (thin) / 0 (none, full)</text>
+    <line x1="280" y1="14" x2="280" y2="48" stroke="#534AB7"/><text x="285" y="34">제목 줄 34 — 패딩 좌 12 · 우 5, 도구 24×24 간격 1</text>
+    <text x="285" y="62">본문 EDIT — 여백 상 4 · 좌우 12 · 하 12, 맑은 고딕 14 (10–32), 줄높이 1.6</text>
+    <text x="285" y="80">테두리 1 px #000 (양 테마), 모서리 각짐, 그림자 없음</text>
+    <text x="285" y="98">기본 260×260, 최소 180×130, 접힘 = 띠 + 34</text>
+    <text x="285" y="116">도구는 hover 또는 포커스 시에만 표시 (opacity 전환 140 ms → v2: 즉시 표시)</text>
+    <text x="285" y="134">제목 줄 모드(full): 제목 줄 배경 = 메모 색, 글자 #222220, 도구 #4A4A46</text>
+    <text x="285" y="152">제목 비어 있음: "제목" (muted, 700) · 본문 비어 있음: "메모" (muted)</text>
+    <text x="285" y="170">이름 변경 중: 제목 자리에 단일 줄 EDIT, 배경 paper-2, 좌 -6 / 패딩 6</text>
+    <text x="285" y="188">⋯ 메뉴: 오른쪽 5, 위 = 띠 + 34 (작으면 위 2, 행 20)</text>
+    <text x="285" y="206">메뉴 항목: 제목 수정 / 색 점 6개 / 띠 모양 · 값 / 다크·라이트 모드 / 메모 목록 / 메모 삭제</text>
+    <text x="285" y="224">확인 카드: scrim 78 %, 카드 최대 폭 220, "삭제하시겠습니까?", [유지] [삭제(강조)]</text>
+  </g>
+</svg>
+<figcaption>그림 7-1. 메모 창 치수·구성 명세 (v1 CSS에서 추출, 그대로 재현)</figcaption>
+</figure>
+
+<h3>7.2 재현 방식 매핑</h3>
+<table>
+  <thead><tr><th style="width:21%">UI 요소</th><th style="width:31%">v1 (웹)</th><th>v2 (Native)</th></tr></thead>
+  <tbody>
+    <tr><td>테두리 1 px</td><td><code>html::after</code> 오버레이</td><td><code>WM_PAINT</code>에서 <code>FrameRect</code>. EDIT 영역은 테두리 안쪽에 배치</td></tr>
+    <tr><td>띠·제목 줄 배경</td><td>div 배경</td><td><code>FillRect</code> (캐시 브러시, 색 6×모드)</td></tr>
+    <tr><td>제목 텍스트</td><td>readonly input, ellipsis</td><td><code>DrawTextW(DT_SINGLELINE|DT_END_ELLIPSIS|DT_VCENTER|DT_NOPREFIX)</code></td></tr>
+    <tr><td>도구 아이콘</td><td>인라인 SVG</td><td>DPI별 알파 비트맵 (PT-A) 또는 D2D 경로 (PT-B)</td></tr>
+    <tr><td>hover 표시</td><td>CSS <code>:hover</code>, opacity 전환</td><td><code>TrackMouseEvent</code> + 상태 플래그, 전환 애니메이션 없음(CPU 0 우선, v1도 동작 줄이기 설정에서 전환 없음)</td></tr>
+    <tr><td>본문 플레이스홀더</td><td><code>placeholder</code></td><td><code>EM_SETCUEBANNER</code>는 단일 줄 전용 → 비어 있을 때 부모가 EDIT 위치에 회색 텍스트를 그림(EDIT 투명 처리 또는 서브클래스 <code>WM_PAINT</code> 후처리)</td></tr>
+    <tr><td>⋯ 메뉴</td><td>절대 위치 div</td><td><code>GM_Popup</code> 소유 창, 키보드 ↑↓ Enter Esc, 바깥 클릭 닫힘(<code>WM_ACTIVATE</code>)</td></tr>
+    <tr><td>색 점</td><td>16×16 버튼 + 체크 SVG</td><td>팝업 내 사각형 + 체크 비트맵</td></tr>
+    <tr><td>확인 카드</td><td>DOM 오버레이</td><td>메모 창 위 <code>GM_Popup</code> 모달(소유 창 비활성화), 기본 포커스 "유지", Esc = 유지</td></tr>
+    <tr><td>목록 행</td><td>button 요소 목록</td><td>단일 창 자체 그리기, 행 높이 고정, 보이는 행만 그림(가상 스크롤)</td></tr>
+    <tr><td>목록 6색 띠</td><td>linear-gradient</td><td>6개 <code>FillRect</code></td></tr>
+    <tr><td>검색창</td><td><code>input type=search</code></td><td>단일 줄 EDIT + <code>EM_SETCUEBANNER("검색")</code></td></tr>
+    <tr><td>"n분 전" 갱신</td><td><code>setInterval</code> 60 s</td><td>목록 창이 보일 때만 <code>SetTimer</code> 60 s, 숨기면 <code>KillTimer</code></td></tr>
+  </tbody>
+</table>
+
+<h3>7.3 상호작용 동등성</h3>
+<div class="grid2">
+<table>
+  <thead><tr><th style="width:40%">입력</th><th>v2 동작</th></tr></thead>
+  <tbody>
+    <tr><td>Ctrl+N / Ctrl+W</td><td>가속기 테이블 (메모 창 포커스 시)</td></tr>
+    <tr><td>Ctrl+휠</td><td>EDIT 서브클래스, 10–32</td></tr>
+    <tr><td>제목 이름 변경 Enter / Esc</td><td>EDIT 서브클래스 <code>WM_KEYDOWN</code> → 확정, Enter는 본문 포커스 + 접힘이면 펼침</td></tr>
+    <tr><td>목록 ↑ ↓ Enter Delete</td><td>목록 창 <code>WM_KEYDOWN</code>, 검색 EDIT 서브클래스에서 ↓ 이동</td></tr>
+    <tr><td>목록 검색 Esc</td><td>검색어 지움</td></tr>
+    <tr><td>우클릭 (본문·제목)</td><td>EDIT 기본 컨텍스트 메뉴 (F-28)</td></tr>
+    <tr><td>우클릭 (목록 행)</td><td><code>TrackPopupMenu</code> "메모 삭제"</td></tr>
+  </tbody>
+</table>
+<div>
+<h4>7.4 재현 위험 항목 (기능 차이 가능성)</h4>
+<table>
+  <thead><tr><th style="width:30%">항목</th><th>차이와 대응</th></tr></thead>
+  <tbody>
+    <tr><td>선택 영역 색 (메모 색 65 %)</td><td>EDIT/RichEdit 모두 시스템 강조색. 대응: 수용(시각 차이로 문서화) 또는 RichEdit 하이라이트 직접 그리기(비용 큼). P1 검토.</td></tr>
+    <tr><td>캐럿 색 (ink)</td><td><code>CreateCaret</code> 비트맵으로 근사 가능 — XOR 합성이라 정확한 색 보장 어려움 <span class="U">미확인</span></td></tr>
+    <tr><td>다단계 실행 취소</td><td>EDIT 1단계. RichEdit 채택 또는 앱 수준 실행 취소 스택. PT-C 결과로 결정</td></tr>
+    <tr><td>도구 opacity 전환</td><td>즉시 표시로 변경 (동작 차이 아님, 시각 차이). 필요 시 <code>WM_TIMER</code> 2–3프레임</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+<!-- ============================ 8 ============================ -->
+<h2 id="s8"><span class="no">8.</span>Memory Management</h2>
+<h3>8.1 메모리 예산 <span class="T">목표</span></h3>
+<div>
+<table>
+  <thead><tr><th style="width:42%">구성 요소</th><th class="num">예산</th><th>근거·측정 방법</th></tr></thead>
+  <tbody>
+    <tr><td>프로세스 기본 (exe, CRT, user32/gdi32 초기화)</td><td class="num">≤ 1.5 MB</td><td>v1 앵커 전용 상태의 앱 프로세스가 트레이만일 때 2.0 MB <span class="M">측정</span>(Tauri 포함) → Tauri 제거로 감소 <span class="E">예상</span></td></tr>
+    <tr><td>SQLite 연결 + 페이지 캐시</td><td class="num">≤ 1.0 MB</td><td><code>PRAGMA cache_size=-512</code>(512 KiB) 고정</td></tr>
+    <tr><td>공유 GDI 자원 (글꼴 6종×테마, 브러시, 아이콘)</td><td class="num">≤ 0.5 MB</td><td>(테마, DPI)당 1벌</td></tr>
+    <tr><td>메모 창 1개 (HWND + EDIT + 텍스트)</td><td class="num">≤ 0.4 MB</td><td>텍스트 1 KB 기준. EDIT 로컬 힙 포함</td></tr>
+    <tr><td>목록 창</td><td class="num">≤ 0.5 MB</td><td>행 요약 캐시 = 메모 수 × (제목+첫 줄)</td></tr>
+    <tr><td><b>합계: 트레이만 / 메모 1 / 메모 10</b></td><td class="num"><b>≤ 3 / 6 / 12 MB</b></td><td>13장 측정으로 검증</td></tr>
+  </tbody>
+</table>
+<div style="width:62%">
+<figure>
+<svg viewBox="0 0 340 190" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="8.5">
+  <text x="0" y="10" font-weight="700" font-size="9">개인 메모리, 메모 10개 (MB, 로그 아님)</text>
+  <g>
+    <text x="0" y="34">v1 초기</text><rect x="70" y="24" width="260" height="14" fill="#BA7517"/><text x="300" y="34" fill="#fff">468.2</text>
+    <text x="0" y="56">v1 렌더러 공유</text><rect x="70" y="46" width="150.8" height="14" fill="#BA7517"/><text x="224" y="56">271.5</text>
+    <text x="0" y="78">v1 GPU 켬(현재)</text><rect x="70" y="68" width="154.7" height="14" fill="#D85A30"/><text x="228" y="78">278.6</text>
+    <text x="0" y="100">v1 GPU 끔(현재)</text><rect x="70" y="90" width="77.7" height="14" fill="#D85A30"/><text x="151" y="100">140.0</text>
+    <text x="0" y="122">v2 목표</text><rect x="70" y="112" width="6.7" height="14" fill="#534AB7"/><text x="80" y="122">≤ 12</text>
+  </g>
+  <text x="0" y="150" font-size="8">주황 = 측정(이력), 붉은색 = 측정(현재 빌드), 보라 = 목표</text>
+  <text x="0" y="164" font-size="8">막대 길이: 468.2 MB = 260 px 선형 축척</text>
+</svg>
+<figcaption>그림 8-1. 메모 10개 개인 메모리 비교</figcaption>
+</figure>
+</div>
+</div>
+
+<h3>8.2 전략</h3>
+<table>
+  <thead><tr><th style="width:24%">전략</th><th>내용</th><th style="width:22%">대안 및 기각 이유</th></tr></thead>
+  <tbody>
+    <tr><td>창별 상태 최소화</td><td>창 상태 구조체에는 id, 핸들, hover/눌림 플래그, 캐시된 레이아웃 사각형만 둔다. 텍스트 원본은 EDIT 버퍼 하나뿐이며 앱은 저장할 때만 <code>GetWindowTextW</code>로 복사한다.</td><td>앱 측 텍스트 사본 상시 보관: 메모 크기만큼 중복.</td></tr>
+    <tr><td>GDI 자원 공유</td><td>글꼴(제목 700/13.5, 본문 400/size, 메뉴 13, 목록 3종)과 브러시를 (테마, DPI, 크기) 키로 캐시. 참조 수 0이 되면 해제(글자 크기 변경 시 사용하지 않는 크기 정리).</td><td>창마다 생성: 메모 50개면 GDI 개체 수백 개.</td></tr>
+    <tr><td>백버퍼 정책</td><td>상시 창별 비트맵 금지. <code>WM_PAINT</code> 중 무효 영역만 임시 비트맵 또는 공용 1개(13.4 실측 후 결정).</td><td>창별 상시 백버퍼: 260×260×4 B×(1.5²) ≈ 0.6 MB/창 <span class="E">예상</span>.</td></tr>
+    <tr><td>닫힌 메모</td><td>닫힌 메모는 HWND·EDIT를 만들지 않는다. 목록용 요약(제목, 첫 줄 100자, 색, 시각)만 메모리에 두고 본문은 열 때 DB에서 읽는다.</td><td>전 메모 본문 상주: 메모 수 × 평균 크기.</td></tr>
+    <tr><td>할당자</td><td>Rust 기본 시스템 할당자(HeapAlloc). 할당 빈도가 낮아 별도 할당자 불필요.</td><td>mimalloc 등: 크기 증가, 이득 없음 <span class="E">예상</span>.</td></tr>
+    <tr><td>작업 집합 트림</td><td>사용하지 않음. 트레이 숨김 시 <code>SetProcessWorkingSetSize(-1,-1)</code>는 지표만 낮추고 재접근 시 페이지 폴트 → 측정 왜곡.</td><td>—</td></tr>
+  </tbody>
+</table>
+<h3>8.3 누수 방지와 검증</h3>
+<ul>
+  <li>모든 Win32 핸들(HFONT, HBRUSH, HBITMAP, HDC, HICON, HMENU)은 RAII 래퍼(<code>Drop</code>에서 <code>DeleteObject</code>/<code>DestroyIcon</code> 등)로 감싼다. 원시 핸들 노출은 <code>render</code> 모듈 내부로 한정.</li>
+  <li>창 상태는 <code>Box::into_raw</code>로 <code>GWLP_USERDATA</code>에 저장하고 <code>WM_NCDESTROY</code>에서 <code>Box::from_raw</code>로 회수(이중 해제 방지 위해 포인터 0으로 재설정).</li>
+  <li>합격 기준: 50개 생성·삭제 1,000회 후 GDI 개체 수·USER 개체 수·핸들 수가 시작값 ±2 이내, 72시간 상주 시 개인 메모리 증가 ≤ 1 MB <span class="T">목표</span>(14·18장).</li>
+</ul>
+
+<!-- ============================ 9 ============================ -->
+<h2 id="s9"><span class="no">9.</span>CPU and Rendering Optimization</h2>
+<div class="grid2">
+<div>
+<h3>9.1 유휴 0 원칙</h3>
+<ul>
+  <li><b>타이머 없음:</b> 상주 중 주기 타이머를 두지 않는다. 유일한 예외는 목록 창이 보일 때의 60 s "n분 전" 갱신(숨기면 해제).</li>
+  <li><b>폴링 없음:</b> 저장 스레드는 채널 <code>recv</code>/<code>recv_timeout</code>에서 커널 대기. 대기할 deadline이 없으면 무기한 대기.</li>
+  <li><b>캐럿:</b> 포커스된 EDIT의 캐럿 깜빡임(기본 530 ms)은 OS 동작으로 남는다. v1 유휴 1.5 %의 유력 원인이 이 깜빡임에 따른 Chromium 합성이라면 <span class="U">미확인</span>, v2에서는 EDIT가 캐럿 영역만 XOR로 그리므로 비용이 작다 <span class="E">예상</span>. P2에서 실측.</li>
+  <li><b>애니메이션 없음:</b> 도구 표시 전환, 메뉴 열림에 애니메이션을 쓰지 않는다.</li>
+</ul>
+<h3>9.2 그리기 비용 통제</h3>
+<ul>
+  <li>무효화 단위 최소화: hover 변경 → 해당 도구 버튼 24×24만, 제목 변경 → 제목 줄만, 테마 전환 → 전 창 1회.</li>
+  <li>이동 중 재그리기 없음: <code>HTCAPTION</code> 이동은 DWM이 창 비트맵을 옮김(클라이언트 재그리기 불필요).</li>
+  <li>크기 조절: <code>WM_SIZE</code>에서 레이아웃 재계산 후 EDIT <code>MoveWindow(..., FALSE)</code> + 한 번의 <code>InvalidateRect</code>. <code>WM_EXITSIZEMOVE</code>에서만 저장.</li>
+  <li>목록: 보이는 행만 그림, 필터는 입력 후 즉시(메모 1,000개 기준 1 ms 이하 <span class="T">목표</span>).</li>
+</ul>
+</div>
+<div>
+<h3>9.3 타이핑 경로 비용</h3>
+<table>
+  <thead><tr><th style="width:42%">단계</th><th>v1</th><th>v2</th></tr></thead>
+  <tbody>
+    <tr><td>키 입력 처리</td><td>Chromium 입력 → 렌더러 JS</td><td>EDIT (커널→user32)</td></tr>
+    <tr><td>화면 갱신</td><td>레이아웃·페인트·합성 (소프트웨어/GPU)</td><td>EDIT 변경 줄만 GDI</td></tr>
+    <tr><td>저장 전달</td><td>JS → IPC(JSON) → tokio → Mutex</td><td>함수 호출 + 채널 send</td></tr>
+    <tr><td>목록 갱신</td><td>IPC 이벤트 → JS 행 교체</td><td>행 1개 <code>InvalidateRect</code></td></tr>
+    <tr><td>디스크</td><td>전체 JSON 재작성 ≤ 3.3회/s</td><td>1행 UPSERT ≤ 3.3회/s</td></tr>
+    <tr><td>CPU (초당 17자)</td><td>28.3 % <span class="M">측정</span></td><td>≤ 3 % <span class="T">목표</span></td></tr>
+  </tbody>
+</table>
+<h3>9.4 GPU 정책</h3>
+<div class="dec"><b class="t">결정 R-1.</b> v2는 GPU를 강제로 끄는 설정을 두지 않는다(지침). GDI 경로는 원래 GPU 장치를 만들지 않으며, Direct2D를 채택하는 경우 하드웨어 렌더 타깃을 기본으로 하고 장치 생성 실패(<code>D2DERR_RECREATE_TARGET</code>, 원격 데스크톱 등) 시 WARP로 대체한다. v1 대비 "GPU 끔"의 메모리 이득(77→13 MB, <span class="M">측정</span>)은 WebView2 GPU 프로세스 특유의 비용이므로 v2에는 해당하지 않는다.</div>
+</div>
+</div>
+
+<!-- ============================ 10 ============================ -->
+<h2 id="s10"><span class="no">10.</span>Storage and Recovery Architecture</h2>
+<div class="grid2">
+<div>
+<h3>10.1 파일 배치</h3>
+<pre>%APPDATA%\gaeunmemo\
+  gaeunmemo.db            SQLite 본 DB (WAL)
+  gaeunmemo.db-wal/-shm   WAL 파일 (실행 중)
+  backup\
+    gaeunmemo-20261113.db  일일 백업 × 7 (VACUUM INTO)
+  broken\
+    gaeunmemo-&lt;시각&gt;.db    손상 판정 원본 보관
+  notes.json              v1 파일 — 읽기 전용 보존
+  notes-backup-*.json     v1 백업 — 손대지 않음</pre>
+<h3>10.2 내구성 설정과 근거</h3>
+<table>
+  <thead><tr><th style="width:36%">설정</th><th>값과 이유</th></tr></thead>
+  <tbody>
+    <tr><td><code>journal_mode</code></td><td>WAL — 커밋당 순차 쓰기 1회, 체크포인트는 비동기. 대안 DELETE는 커밋마다 저널 생성·삭제로 fsync 증가.</td></tr>
+    <tr><td><code>synchronous</code></td><td>FULL — WAL에서 커밋마다 fsync → 전원 차단에도 커밋된 내용 유지. NORMAL은 마지막 커밋들이 유실될 수 있음(사용자 요구: 강제 종료에도 내용 유지).</td></tr>
+    <tr><td><code>wal_autocheckpoint</code></td><td>기본 1,000 페이지. 종료 시 <code>PRAGMA wal_checkpoint(TRUNCATE)</code></td></tr>
+    <tr><td><code>cache_size</code></td><td>-512 (KiB) — 메모리 예산 고정</td></tr>
+    <tr><td><code>busy_timeout</code></td><td>2,000 ms — 백업과 쓰기의 짧은 경합 흡수</td></tr>
+    <tr><td><code>foreign_keys</code>, <code>user_version</code></td><td>ON, 스키마 버전 1</td></tr>
+  </tbody>
+</table>
+</div>
+<div>
+<h3>10.3 쓰기 정책</h3>
+<table>
+  <thead><tr><th style="width:30%">이벤트</th><th>v2 처리</th></tr></thead>
+  <tbody>
+    <tr><td>본문·제목 변경</td><td>선행 에지 throttle 300 ms (v1 <code>plan_write</code> 그대로). 같은 id 변경은 병합</td></tr>
+    <tr><td>색·핀·접힘·글자 크기·띠·테마</td><td>즉시 커밋 (빈도 낮음)</td></tr>
+    <tr><td>이동·크기 조절</td><td><code>WM_EXITSIZEMOVE</code> 시 1회</td></tr>
+    <tr><td>창 닫기, 포커스 이탈</td><td>대기 중인 쓰기 즉시 실행 (손실 창 축소)</td></tr>
+    <tr><td>세션 종료, 앱 종료</td><td><code>Flush</code> 동기 대기 → 체크포인트</td></tr>
+  </tbody>
+</table>
+<h3>10.4 장애 시나리오와 대응</h3>
+<table>
+  <thead><tr><th style="width:30%">장애</th><th>영향</th><th style="width:38%">대응</th></tr></thead>
+  <tbody>
+    <tr><td>프로세스 강제 종료</td><td>마지막 ≤ 300 ms 입력 <span class="T">목표</span></td><td>커밋된 내용은 WAL로 보존. 다음 시작 시 자동 복구</td></tr>
+    <tr><td>전원 차단</td><td>상동 (FULL)</td><td>상동. 디스크 쓰기 캐시 거짓 보고는 OS/하드웨어 한계</td></tr>
+    <tr><td>DB 손상 (quick_check 실패)</td><td>시작 불가</td><td>원본을 <code>broken\</code>로 이동 → 최신 백업부터 검사 통과본 복원 → 사용자 알림. 백업 없으면 빈 DB + v1 notes.json 재가져오기 제안</td></tr>
+    <tr><td>디스크 가득 참 / 권한 오류</td><td>커밋 실패</td><td>메모리 상태 유지, <code>WM_APP_STORE</code>로 트레이 알림, 지수 백오프 재시도(1·2·4…최대 60 s)</td></tr>
+    <tr><td>백업 실패</td><td>백업 누락</td><td>다음 쓰기 때 재시도, 본 DB 영향 없음</td></tr>
+    <tr><td>시계 역행</td><td>백업 날짜 꼬임</td><td>파일명 날짜 기준 정렬·7개 유지(v1 동일)</td></tr>
+    <tr><td>DB 잠김 (다른 프로세스)</td><td>쓰기 지연</td><td>단일 인스턴스로 예방, busy_timeout</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+
+<!-- ============================ 11 ============================ -->
+<h2 id="s11"><span class="no">11.</span>Threading and Event Processing</h2>
+<div class="grid2">
+<figure>
+<svg viewBox="0 0 340 260" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="8.5">
+  <defs><marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="#333"/></marker></defs>
+  <text x="40" y="12" font-weight="700">UI 스레드</text><text x="230" y="12" font-weight="700">저장 스레드</text>
+  <line x1="70" y1="18" x2="70" y2="255" stroke="#534AB7" stroke-width="2"/><line x1="260" y1="18" x2="260" y2="255" stroke="#1D9E75" stroke-width="2"/>
+  <text x="76" y="36">GetMessageW (대기)</text>
+  <text x="76" y="58">EN_CHANGE → on_edit</text>
+  <line x1="70" y1="66" x2="258" y2="78" stroke="#333" marker-end="url(#d)"/><text x="120" y="68">UpsertNote(행)</text>
+  <text x="264" y="84">recv → plan_write</text><text x="264" y="98">즉시 / deadline</text>
+  <text x="264" y="118">COMMIT (fsync)</text>
+  <text x="76" y="132">EN_CHANGE × n (병합)</text>
+  <line x1="70" y1="140" x2="258" y2="150" stroke="#333" marker-end="url(#d)"/>
+  <text x="264" y="160">recv_timeout(deadline)</text>
+  <text x="264" y="176">→ 마지막 값만 COMMIT</text>
+  <text x="76" y="200">WM_QUERYENDSESSION</text>
+  <line x1="70" y1="206" x2="258" y2="214" stroke="#D85A30" marker-end="url(#d)"/><text x="110" y="205" fill="#D85A30">Flush(sync)</text>
+  <text x="264" y="224">대기분 COMMIT</text>
+  <line x1="258" y1="232" x2="72" y2="242" stroke="#D85A30" stroke-dasharray="3 2" marker-end="url(#d)"/><text x="120" y="250" fill="#D85A30">완료 신호 (≤ 2 s)</text>
+</svg>
+<figcaption>그림 11-1. UI·저장 스레드 상호작용</figcaption>
+</figure>
+<div>
+<h3>11.1 규칙</h3>
+<ul>
+  <li>UI 스레드만 HWND·GDI·앱 상태를 만진다. 다른 스레드는 <code>PostMessageW</code>로만 UI에 알린다.</li>
+  <li>UI → 저장: <code>std::sync::mpsc::Sender&lt;StoreCmd&gt;</code>. 값은 소유 데이터로 복사되어 공유 상태·잠금이 없다(v1은 <code>Mutex&lt;Data&gt;</code>를 양쪽이 잠금).</li>
+  <li>UI 스레드에서 금지: 파일 I/O, SQLite 호출, 네트워크, <code>Sleep</code>, 1 ms 이상 걸리는 계산. 예외는 시작 시 DB 열기·로드(첫 창 표시 전 1회, 10 ms 이하 <span class="T">목표</span>).</li>
+  <li>모달 루프(<code>TrackPopupMenu</code>, 이동·크기 조절, 확인 카드) 중에도 저장 스레드는 독립적으로 진행.</li>
+  <li>panic 정책: 릴리스는 <code>panic="abort"</code>(v1 동일). 모든 WndProc 진입부는 <code>Result</code>를 반환하는 내부 함수로 위임하고 오류는 기록 후 기본 처리로 진행 — FFI 경계에서 unwinding이 발생하지 않도록 한다.</li>
+</ul>
+</div>
+</div>
+<h3>11.2 메시지 루프</h3>
+<pre>while GetMessageW(&amp;mut msg, null, 0, 0) &gt; 0 {
+    if popup::is_dialog_msg(&amp;msg) { continue; }       // 팝업 키보드 탐색
+    if TranslateAcceleratorW(active_note, haccel, &amp;msg) != 0 { continue; }
+    TranslateMessage(&amp;msg);
+    DispatchMessageW(&amp;msg);
+}   // WM_QUIT은 트레이 "종료"에서만 PostQuitMessage</pre>
+
+<!-- ============================ 12 ============================ -->
+<h2 id="s12"><span class="no">12.</span>Database Design</h2>
+<pre>-- schema v1 (PRAGMA user_version = 1)
+CREATE TABLE note (
+  id          TEXT PRIMARY KEY,           -- UUID v4 (v1 id 그대로)
+  title       TEXT NOT NULL DEFAULT '',   -- ≤ 500자 (앱에서 보장)
+  body        TEXT NOT NULL DEFAULT '',   -- ≤ 200,000자, LF 정규화
+  color       TEXT NOT NULL CHECK (color IN
+     ('#AFA9EC','#F4C0D1','#9FE1CB','#F6C9A0','#B5D4F4','#F3E9C6')),
+  pinned      INTEGER NOT NULL DEFAULT 0 CHECK (pinned IN (0,1)),
+  folded      INTEGER NOT NULL DEFAULT 0 CHECK (folded IN (0,1)),
+  is_open     INTEGER NOT NULL DEFAULT 1 CHECK (is_open IN (0,1)),
+  x REAL, y REAL, w REAL, h REAL,         -- 논리 px, NULL = 미배치
+  font_size   INTEGER NOT NULL DEFAULT 14 CHECK (font_size BETWEEN 10 AND 32),
+  seq         INTEGER NOT NULL,           -- 생성 순서 (v1 배열 순서)
+  created_at  INTEGER NOT NULL,           -- ms epoch
+  updated_at  INTEGER NOT NULL DEFAULT 0, -- v1 updatedAt
+  deleted_at  INTEGER                     -- 제안: 소프트 삭제 (10.4)
+);
+CREATE INDEX note_live_updated ON note(updated_at DESC)
+  WHERE deleted_at IS NULL;
+
+CREATE TABLE window_state (               -- 목록 창 등
+  name TEXT PRIMARY KEY,                  -- 'list'
+  is_open INTEGER NOT NULL DEFAULT 0,
+  x REAL, y REAL, w REAL, h REAL
+);
+CREATE TABLE setting (                    -- theme, band, next_color,
+  key TEXT PRIMARY KEY, value TEXT NOT NULL -- initialized
+);
+CREATE TABLE meta (                       -- 마이그레이션 기록
+  key TEXT PRIMARY KEY, value TEXT NOT NULL
+);  -- 'migrated_from', 'v1_sha256', 'migrated_at'</pre>
+<div class="grid2">
+<div>
+<h3>12.1 설계 근거</h3>
+<table>
+  <thead><tr><th style="width:30%">결정</th><th>이유 / 대안</th></tr></thead>
+  <tbody>
+    <tr><td>메모 1행</td><td>v1 Note 필드와 1:1 대응 → 왕복 변환 손실 없음. 정규화(색 테이블 등)는 이득 없음.</td></tr>
+    <tr><td>id TEXT(UUID)</td><td>v1 id 보존(외부 참조·백업 대조). INTEGER rowid 대비 크기 약간 증가, 메모 수가 작아 무시.</td></tr>
+    <tr><td>color TEXT + CHECK</td><td>v1 저장값 그대로, 팔레트 외 값은 가져오기 전 정규화(v1 sanitize).</td></tr>
+    <tr><td>seq</td><td>v1의 배열 순서(생성 순)를 보존해 목록 동순위 정렬(v1: updatedAt 내림차순, 같으면 최근 생성 우선)을 재현.</td></tr>
+    <tr><td>setting 키-값</td><td>설정 4개뿐, 스키마 변경 없이 추가 가능.</td></tr>
+    <tr><td>deleted_at (제안)</td><td>삭제를 즉시 지우지 않고 30일 보관 후 정리 → 실수 복구 경로. <b>UI 기능 추가는 아님</b>(복구는 지원 도구로만). 사용자 승인 필요 항목.</td></tr>
+    <tr><td>FTS 미사용</td><td>검색은 메모 수가 작아 메모리 내 부분 문자열 비교로 충분(v1 동일). FTS5는 DB 크기·쓰기 비용 증가.</td></tr>
+  </tbody>
+</table>
+</div>
+<div>
+<h3>12.2 주요 쿼리</h3>
+<table>
+  <thead><tr><th style="width:26%">용도</th><th>SQL</th></tr></thead>
+  <tbody>
+    <tr><td>시작 로드</td><td><code>SELECT … FROM note WHERE deleted_at IS NULL ORDER BY seq</code></td></tr>
+    <tr><td>저장</td><td><code>INSERT … ON CONFLICT(id) DO UPDATE SET …</code> (prepared, 재사용)</td></tr>
+    <tr><td>삭제</td><td><code>UPDATE note SET deleted_at=? WHERE id=?</code></td></tr>
+    <tr><td>정리</td><td><code>DELETE FROM note WHERE deleted_at &lt; ?</code> (시작 시)</td></tr>
+    <tr><td>백업</td><td><code>VACUUM INTO 'backup/gaeunmemo-YYYYMMDD.db'</code></td></tr>
+    <tr><td>검사</td><td><code>PRAGMA quick_check</code> (시작), <code>integrity_check</code> (백업 후 표본)</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+<figure>
+<svg viewBox="0 0 700 95" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="8.5">
+  <rect x="5" y="5" width="200" height="85" fill="#fff" stroke="#534AB7"/><text x="12" y="20" font-weight="700">note</text><text x="12" y="34">PK id · title · body · color</text><text x="12" y="47">pinned · folded · is_open</text><text x="12" y="60">x · y · w · h · font_size</text><text x="12" y="73">seq · created_at · updated_at · deleted_at</text>
+  <rect x="225" y="5" width="140" height="58" fill="#fff" stroke="#534AB7"/><text x="232" y="20" font-weight="700">window_state</text><text x="232" y="34">PK name ('list')</text><text x="232" y="47">is_open · x · y · w · h</text>
+  <rect x="385" y="5" width="140" height="58" fill="#fff" stroke="#534AB7"/><text x="392" y="20" font-weight="700">setting</text><text x="392" y="34">PK key · value</text><text x="392" y="47">theme · band · next_color · initialized</text>
+  <rect x="545" y="5" width="150" height="58" fill="#fff" stroke="#534AB7"/><text x="552" y="20" font-weight="700">meta</text><text x="552" y="34">PK key · value</text><text x="552" y="47">migrated_from · v1_sha256 · at</text>
+  <text x="225" y="82">테이블 간 외래키 없음 — 각 테이블은 독립 갱신 단위(저장 명령 1개 = 1 트랜잭션)</text>
+</svg>
+<figcaption>그림 12-1. 데이터 구조도 (v1 notes.json ↔ v2 테이블 대응은 16.2절)</figcaption>
+</figure>
+
+<!-- ============================ 13 ============================ -->
+<h2 id="s13"><span class="no">13.</span>Performance Benchmarking</h2>
+<h3>13.1 지표·방법·목표</h3>
+<table>
+  <thead><tr><th style="width:20%">지표</th><th style="width:36%">측정 방법</th><th style="width:16%">v1 기준선 <span class="M">측정</span></th><th>v2 목표 <span class="T">목표</span></th></tr></thead>
+  <tbody>
+    <tr><td>개인 메모리 (트레이/1/10/50)</td><td>시작 8 s 후 <code>PrivateUsage</code>, 3회 중앙값</td><td>2.0 / 99.1 / 140.0 / — MB</td><td>≤ 3 / 6 / 12 / 25 MB</td></tr>
+    <tr><td>프로세스 수</td><td>프로세스 트리</td><td>1 / 7 / 7</td><td>1 / 1 / 1</td></tr>
+    <tr><td>유휴 CPU</td><td>60 s CPU 시간 증가 ÷ 경과, 포커스 메모 1</td><td>1.55 % (30 s)</td><td>≤ 0.02 % (캐럿 깜빡임 포함)</td></tr>
+    <tr><td>유휴 깨어남</td><td>WPR CPU Usage (Precise), 60 s</td><td>— <span class="U">미확인</span></td><td>캐럿 주기 외 0회</td></tr>
+    <tr><td>타이핑 CPU</td><td>SendKeys 200자/20 ms</td><td>28.3 %</td><td>≤ 3 %</td></tr>
+    <tr><td>입력 지연</td><td>키 이벤트 → EN_CHANGE QPC 차이, p95</td><td>— <span class="U">미확인</span></td><td>p95 ≤ 4 ms</td></tr>
+    <tr><td>첫 창 표시 (메모 1/10)</td><td>프로세스 시작 → 마지막 창 visible + 첫 WM_PAINT 완료</td><td>0.11–0.28 / 1.87–2.04 s (visible 기준)</td><td>≤ 0.10 / 0.20 s</td></tr>
+    <tr><td>WM_PAINT 시간</td><td>QPC 계측 빌드, 260×260 @150 %</td><td>해당 없음</td><td>≤ 1 ms (GDI)</td></tr>
+    <tr><td>저장 지연</td><td>EN_CHANGE → COMMIT 완료</td><td>≤ 300 ms (설계값)</td><td>≤ 300 ms, 강제 종료 손실 ≤ 300 ms</td></tr>
+    <tr><td>GDI / USER 개체</td><td><code>GetGuiResources</code></td><td>23/33 · 59/118 (앱 프로세스만)</td><td>메모 10개 ≤ 120 / 80</td></tr>
+    <tr><td>바이너리 / 설치</td><td>파일 크기</td><td>2.75 MB / 1.03 MiB</td><td>≤ 2.5 MB / 1.5 MiB (SQLite 포함)</td></tr>
+  </tbody>
+</table>
+<h3>13.2 측정 절차 표준화</h3>
+<ul class="small">
+  <li>환경 고정: 전원 모드 "최고 성능", 다른 앱 종료, 측정 전 30 s 대기, 동일 테스트 데이터(부록 A.4 생성 스크립트), 같은 DPI(150 %).</li>
+  <li>반복: 각 시나리오 3회, 중앙값 보고, 최소·최대 병기. v1 기준선은 2회 측정이라 범위로 표기했다.</li>
+  <li>v1·v2 같은 날 같은 하네스로 측정해 비교표를 갱신한다(13.3).</li>
+</ul>
+<h3>13.3 성능 비교표 (현재까지)</h3>
+<table>
+  <thead><tr><th style="width:25%">지표</th><th class="num">v1 GPU 켬 <span class="M">측정</span></th><th class="num">v1 GPU 끔 <span class="M">측정</span></th><th class="num">PT-A (GDI)</th><th class="num">PT-B (D2D)</th><th class="num">v2 목표</th></tr></thead>
+  <tbody>
+    <tr><td>개인 메모리, 메모 1</td><td class="num">159.3</td><td class="num">99.1</td><td class="num">P0에서 측정</td><td class="num">P0에서 측정</td><td class="num">≤ 6</td></tr>
+    <tr><td>개인 메모리, 메모 10</td><td class="num">278.6</td><td class="num">140.0</td><td class="num">〃</td><td class="num">〃</td><td class="num">≤ 12</td></tr>
+    <tr><td>유휴 CPU %, 메모 1</td><td class="num">1.75</td><td class="num">1.55</td><td class="num">〃</td><td class="num">〃</td><td class="num">≤ 0.02</td></tr>
+    <tr><td>타이핑 CPU %, 메모 1</td><td class="num">32.05</td><td class="num">28.25</td><td class="num">〃</td><td class="num">〃</td><td class="num">≤ 3</td></tr>
+    <tr><td>프로세스 수</td><td class="num">7</td><td class="num">7</td><td class="num">1 (설계)</td><td class="num">1 (설계)</td><td class="num">1</td></tr>
+  </tbody>
+</table>
+<h3>13.4 GDI 대 Direct2D 비교 계획</h3>
+<p>6.7절 PT-A/B/B′를 같은 시나리오로 측정한다. 추가로 백버퍼 정책(임시 비트맵 대 공용 1개)과 아이콘 방식(알파 비트맵 대 D2D 경로)을 PT-A 안에서 비교한다. 결과는 본 문서 Rev 1.1의 13.3 표에 채우며, 채택 기준은 6.7절 판정 규칙을 따른다. 측정 전에는 어느 쪽이 낫다고 주장하지 않는다.</p>
+
+<!-- ============================ 14 ============================ -->
+<h2 id="s14"><span class="no">14.</span>Testing and QA Strategy</h2>
+<div class="grid2">
+<table>
+  <caption>표 14-1. 테스트 계층</caption>
+  <thead><tr><th style="width:22%">계층</th><th>범위</th><th style="width:22%">도구</th></tr></thead>
+  <tbody>
+    <tr><td>단위</td><td>모델 정규화, throttle 계획, fit_rect, v1 가져오기(형식 1·2·숫자 띠), SQLite 스키마·마이그레이션·복구 경로, LF/CRLF 변환</td><td><code>cargo test</code> (v1 23개 이식 + 신규)</td></tr>
+    <tr><td>통합 (헤드리스)</td><td>Store 스레드: 강제 종료 시뮬레이션(쓰기 중 프로세스 kill), 손상 DB 주입, 디스크 가득 참(쿼터 VHD)</td><td>자식 프로세스 하네스</td></tr>
+    <tr><td>UI 자동</td><td>창 생성·이동·크기·접기·핀·메뉴·삭제 카드·목록 검색·키보드, 단일 인스턴스, 트레이 메뉴</td><td>UI Automation(<code>IUIAutomation</code>) + <code>SendInput</code></td></tr>
+    <tr><td>IME 수동</td><td>한글 2벌식/3벌식 조합, 조합 중 저장·닫기·포커스 이동, 한자 변환, 일본어 IME 기본 동작</td><td>체크리스트 (부록 A.3)</td></tr>
+    <tr><td>시각 회귀</td><td>메모·목록·메뉴·카드 × 테마 2 × 띠 3 × DPI 4 스크린샷 비교(v1 대비 허용 차이 목록)</td><td>캡처 + 픽셀 차이</td></tr>
+    <tr><td>성능</td><td>13장 지표 전부</td><td>PowerShell 하네스, WPR</td></tr>
+    <tr><td>장시간</td><td>72 h 상주: 5분마다 메모리·핸들·GDI/USER 기록, 1시간마다 자동 입력 1분</td><td>스케줄러 스크립트</td></tr>
+    <tr><td>호환</td><td>Windows 10 22H2 / 11 23H2·24H2·25H2, 다중 모니터·혼합 DPI, 고대비, 원격 데스크톱</td><td>VM + 실기기</td></tr>
+  </tbody>
+</table>
+<div>
+<h3>14.2 데이터 안정성 테스트</h3>
+<table>
+  <thead><tr><th style="width:44%">케이스</th><th>합격 기준</th></tr></thead>
+  <tbody>
+    <tr><td>입력 직후 0 / 100 / 350 ms에 강제 kill (각 50회)</td><td>DB 열기 성공 100 %, 350 ms 경우 내용 100 % 보존</td></tr>
+    <tr><td>COMMIT 도중 kill (디버그 지연 주입)</td><td>이전 커밋 상태로 일관성 유지</td></tr>
+    <tr><td>DB 파일 임의 바이트 손상</td><td>quick_check 실패 감지 → 백업 복원, 원본 보관</td></tr>
+    <tr><td>v1 notes.json 가져오기 (실데이터 사본 + 합성 데이터 1,000개, 이모지·서로게이트·CRLF·200,000자)</td><td>모든 필드 왕복 일치(정규화 규칙 제외), 원본 바이트 불변(SHA-256 일치)</td></tr>
+    <tr><td>로그오프·재시작·종료 (<code>shutdown /r /t 0</code>)</td><td>종료 직전 1 s 입력까지 보존</td></tr>
+  </tbody>
+</table>
+<h3>14.3 결함 등급과 단계 진행 규칙</h3>
+<ul class="small">
+  <li>S1 데이터 손실·손상, 크래시 / S2 기능 불일치(F-xx) / S3 시각 차이 / S4 기타.</li>
+  <li>각 P단계 종료 조건: S1·S2 0건, 해당 단계 성능 지표 목표 이내, 단위·통합 테스트 100 % 통과(지침 10).</li>
+</ul>
+</div>
+</div>
+
+<!-- ============================ 15 ============================ -->
+<h2 id="s15"><span class="no">15.</span>Risk Assessment</h2>
+<table>
+  <thead><tr><th style="width:4%">#</th><th style="width:25%">위험</th><th style="width:7.5%" class="c">가능성</th><th style="width:6%" class="c">영향</th><th>대응</th><th style="width:16%">조기 경보</th></tr></thead>
+  <tbody>
+    <tr><td>R1</td><td>EDIT의 선택·캐럿 색, 다단계 실행 취소 미지원으로 v1과 차이</td><td class="c">높음</td><td class="c">중</td><td>PT-C(RichEdit) 실측, 차이 항목 사용자 승인 후 확정. 앱 수준 실행 취소 스택 대안</td><td>P1 시각 검토</td></tr>
+    <tr><td>R2</td><td>한글 IME 조합 중 이벤트 처리 차이(EN_CHANGE 시점, 제목 EDIT 생성·파괴 중 조합)</td><td class="c">중</td><td class="c">높음</td><td>P2 전용 단계, 조합 중 이름 변경 종료 시 <code>ImmNotifyIME(NI_COMPOSITIONSTR, CPS_COMPLETE)</code></td><td>IME 체크리스트</td></tr>
+    <tr><td>R3</td><td>프레임 없는 창의 DWM 동작(Win10 각진/둥근 모서리, 스냅, 그림자)</td><td class="c">중</td><td class="c">중</td><td>Win10·11 VM에서 P1 검증, DWM 속성은 지원 OS에서만 호출</td><td>호환 테스트</td></tr>
+    <tr><td>R4</td><td>혼합 DPI 다중 모니터에서 좌표 변환 오류(v1 논리 px 저장과의 일관성)</td><td class="c">중</td><td class="c">중</td><td>저장은 v1과 같은 논리 px, 복원 시 대상 모니터 DPI로 변환, fit_rect 재사용</td><td>DPI 매트릭스</td></tr>
+    <tr><td>R5</td><td>unsafe FFI 코드 결함(핸들 누수, use-after-free)</td><td class="c">중</td><td class="c">높음</td><td>RAII 래퍼, unsafe를 <code>platform</code>/<code>render</code>/<code>ui</code> 경계로 한정, 누수 테스트, Miri 불가 영역은 코드 리뷰</td><td>GDI 개체 추세</td></tr>
+    <tr><td>R6</td><td>SQLite 번들로 바이너리 증가가 목표 초과</td><td class="c">중</td><td class="c">낮음</td><td>필요 기능만 컴파일(<code>SQLITE_OMIT_*</code>), 또는 OS <code>winsqlite3.dll</code>(R7 확인 후)</td><td>P3 크기 측정</td></tr>
+    <tr><td>R7</td><td><code>winsqlite3.dll</code> 사용 시 OS 버전별 차이·지원 범위 불명확</td><td class="c">중</td><td class="c">중</td><td>기본은 번들, winsqlite3는 측정·검증 후 선택</td><td>—</td></tr>
+    <tr><td>R8</td><td>마이그레이션 중 데이터 불일치</td><td class="c">낮음</td><td class="c">높음</td><td>원본 불변, 단일 트랜잭션, 가져온 후 필드별 대조, 실패 시 DB 폐기·v1 파일 유지</td><td>meta 해시</td></tr>
+    <tr><td>R9</td><td>접근성(스크린 리더): 자체 그린 도구 버튼·목록 행</td><td class="c">높음</td><td class="c">중</td><td>도구 버튼은 실제 BUTTON 자식(owner-draw) 사용 검토, 목록은 UIA 공급자 또는 ListView(소유자 그리기)</td><td>Narrator 점검</td></tr>
+    <tr><td>R10</td><td>다크 스크롤바 등 비공식 API 변경</td><td class="c">낮음</td><td class="c">낮음</td><td>실패 시 기본 모양으로 저하</td><td>—</td></tr>
+    <tr><td>R11</td><td>일정 과소 추정 (Win32 세부 동작 다수)</td><td class="c">중</td><td class="c">중</td><td>P0 프로토타입 결과로 17장 일정 재산정</td><td>P0 종료 검토</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================ 16 ============================ -->
+<h2 id="s16"><span class="no">16.</span>Migration Strategy</h2>
+<h3>16.1 절차</h3>
+<figure>
+<svg viewBox="0 0 700 120" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="8.5">
+  <defs><marker id="e" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0L10 5L0 10z" fill="#333"/></marker></defs>
+  <g>
+  <rect x="5" y="10" width="105" height="58" fill="#fff" stroke="#555"/><text x="11" y="26" font-weight="700">① 감지</text><text x="11" y="40">gaeunmemo.db 없음</text><text x="11" y="53">notes.json 있음</text>
+  <rect x="122" y="10" width="105" height="58" fill="#fff" stroke="#555"/><text x="128" y="26" font-weight="700">② 읽기·검증</text><text x="128" y="40">v1 load + sanitize</text><text x="128" y="53">SHA-256 기록</text>
+  <rect x="239" y="10" width="105" height="58" fill="#fff" stroke="#555"/><text x="245" y="26" font-weight="700">③ 임시 DB</text><text x="245" y="40">gaeunmemo.db.tmp</text><text x="245" y="53">1 트랜잭션 INSERT</text>
+  <rect x="356" y="10" width="105" height="58" fill="#fff" stroke="#555"/><text x="362" y="26" font-weight="700">④ 대조</text><text x="362" y="40">행 수·필드 비교</text><text x="362" y="53">integrity_check</text>
+  <rect x="473" y="10" width="105" height="58" fill="#EEF7F2" stroke="#1D9E75"/><text x="479" y="26" font-weight="700">⑤ 확정</text><text x="479" y="40">rename → .db</text><text x="479" y="53">meta 기록</text>
+  <rect x="590" y="10" width="105" height="58" fill="#FDF3EF" stroke="#D85A30"/><text x="596" y="26" font-weight="700">실패 시</text><text x="596" y="40">.tmp 삭제</text><text x="596" y="53">notes.json 무변경</text>
+  </g>
+  <g stroke="#333" marker-end="url(#e)"><line x1="110" y1="39" x2="120" y2="39"/><line x1="227" y1="39" x2="237" y2="39"/><line x1="344" y1="39" x2="354" y2="39"/><line x1="461" y1="39" x2="471" y2="39"/></g>
+  <path d="M400 68 Q 520 100 640 70" fill="none" stroke="#D85A30" stroke-dasharray="3 2" marker-end="url(#e)"/>
+  <text x="5" y="90">v1 notes.json이 없으면: v1과 동일하게 %APPDATA%\StickyMemo\notes.json 가져오기(형식 1·2) → 같은 ②~⑤ 경로. 둘 다 없으면 첫 실행(빈 메모 1개).</text>
+  <text x="5" y="105">파싱 실패한 notes.json: v1 규칙대로 notes-broken-&lt;시각&gt;.json 복사 보관, 빈 DB로 시작, 사용자 알림. 원본은 지우지 않는다.</text>
+</svg>
+<figcaption>그림 16-1. v1 → v2 데이터 마이그레이션 흐름 (원본 보존, 원자적 확정)</figcaption>
+</figure>
+<div class="grid2">
+<table>
+  <caption>표 16-2. 필드 대응</caption>
+  <thead><tr><th style="width:42%">v1 (notes.json)</th><th>v2 (SQLite)</th></tr></thead>
+  <tbody>
+    <tr><td><code>notes[i].id</code></td><td><code>note.id</code> (그대로)</td></tr>
+    <tr><td><code>title</code> / <code>text</code></td><td><code>title</code> / <code>body</code> (CRLF→LF)</td></tr>
+    <tr><td><code>color</code></td><td><code>color</code> (sanitize 후)</td></tr>
+    <tr><td><code>pinned</code>, <code>folded</code>, <code>open</code></td><td><code>pinned</code>, <code>folded</code>, <code>is_open</code></td></tr>
+    <tr><td><code>bounds.{x,y,width,height}</code> / null</td><td><code>x, y, w, h</code> / NULL</td></tr>
+    <tr><td><code>updatedAt</code>, <code>fontSize</code></td><td><code>updated_at</code>, <code>font_size</code></td></tr>
+    <tr><td>배열 위치 i</td><td><code>seq = i</code>, <code>created_at</code> = 가져온 시각 − (n − i) ms</td></tr>
+    <tr><td><code>list.open</code>, <code>list.bounds</code></td><td><code>window_state('list')</code></td></tr>
+    <tr><td><code>settings.theme/band/nextColor/initialized</code></td><td><code>setting</code> 4행 (band 숫자 형식은 v1 규칙으로 변환)</td></tr>
+  </tbody>
+</table>
+<div>
+<h3>16.3 설치·공존·롤백</h3>
+<ul class="small">
+  <li><b>설치 경로:</b> v1과 같은 <code>%LOCALAPPDATA%\GaeunMemo\gaeunmemo.exe</code>를 교체. 자동 실행 값 이름 "gaeunmemo"·인자 <code>--autostart</code> 동일 → 레지스트리 변경 최소.</li>
+  <li><b>설치 관리자:</b> NSIS 유지(사용자 단위 설치). Tauri 번들러가 없어지므로 NSIS 스크립트를 직접 작성. WebView2 부트스트래퍼 제거.</li>
+  <li><b>실행 중 교체:</b> 설치 전 기존 인스턴스에 종료 요청(앵커 창 <code>SC_CLOSE</code> = v1의 정상 종료 경로, 저장 flush 포함).</li>
+  <li><b>롤백:</b> v1 재설치 시 v1은 그대로 남아 있는 <code>notes.json</code>을 읽는다. 단 v2에서 바꾼 내용은 반영되지 않으므로, v2에 "v1 형식으로 내보내기" 지원 도구(<code>gaeunmemo.exe --export-v1</code>)를 둔다(제안, UI 기능 아님).</li>
+  <li><b>WebView2 데이터:</b> v1이 만든 <code>%LOCALAPPDATA%\com.gaeunmemo.app\EBWebView</code>는 v2에서 불필요. 삭제는 사용자 데이터가 아니지만 자동 삭제하지 않고 설치 관리자 옵션으로만 제공.</li>
+</ul>
+</div>
+</div>
+
+<!-- ============================ 17 ============================ -->
+<h2 id="s17"><span class="no">17.</span>Development Roadmap</h2>
+<figure>
+<svg viewBox="0 0 700 200" xmlns="http://www.w3.org/2000/svg" font-family="Malgun Gothic" font-size="8.5">
+  <g fill="#666"><text x="150" y="12">1주</text><text x="215" y="12">2</text><text x="280" y="12">3</text><text x="345" y="12">4</text><text x="410" y="12">5</text><text x="475" y="12">6</text><text x="540" y="12">7</text><text x="605" y="12">8</text></g>
+  <g stroke="#ddd"><line x1="140" y1="16" x2="140" y2="195"/><line x1="205" y1="16" x2="205" y2="195"/><line x1="270" y1="16" x2="270" y2="195"/><line x1="335" y1="16" x2="335" y2="195"/><line x1="400" y1="16" x2="400" y2="195"/><line x1="465" y1="16" x2="465" y2="195"/><line x1="530" y1="16" x2="530" y2="195"/><line x1="595" y1="16" x2="595" y2="195"/><line x1="660" y1="16" x2="660" y2="195"/></g>
+  <g>
+  <text x="2" y="31">P0 Win32·다중 창·PT-A/B</text><rect x="140" y="22" width="78" height="12" fill="#534AB7"/>
+  <text x="2" y="51">P1 UI 재현</text><rect x="205" y="42" width="110" height="12" fill="#7F77DD"/>
+  <text x="2" y="71">P2 텍스트·한글 IME</text><rect x="290" y="62" width="70" height="12" fill="#7F77DD"/>
+  <text x="2" y="91">P3 생성·삭제·저장(SQLite)</text><rect x="335" y="82" width="85" height="12" fill="#1D9E75"/>
+  <text x="2" y="111">P4 트레이·자동 실행</text><rect x="400" y="102" width="40" height="12" fill="#1D9E75"/>
+  <text x="2" y="131">P5 데이터 복구·마이그레이션</text><rect x="420" y="122" width="65" height="12" fill="#1D9E75"/>
+  <text x="2" y="151">P6 메모리·CPU 최적화</text><rect x="465" y="142" width="80" height="12" fill="#BA7517"/>
+  <text x="2" y="171">P7 배포·QA·72h 상주</text><rect x="530" y="162" width="130" height="12" fill="#D85A30"/>
+  </g>
+  <text x="2" y="192" font-size="8">1인 기준 예상 약 8주 [예상] — P0 종료 시 재산정. 막대 겹침은 앞 단계 마무리와 병행 가능한 준비 작업.</text>
+</svg>
+<figcaption>그림 17-1. 개발 일정 (지침의 P0–P7 우선순위 그대로, 기간은 예상)</figcaption>
+</figure>
+<table>
+  <thead><tr><th style="width:6%">단계</th><th style="width:31%">산출물</th><th>종료 기준 (다음 단계 진입 조건)</th></tr></thead>
+  <tbody>
+    <tr><td>P0</td><td>Win32 앱 골격, 메시지 루프, GM_Note 다중 창, 히트 테스트, PT-A/PT-B/PT-B′/PT-C 측정 하네스</td><td>메모 50개 열기·닫기 누수 0, 13.3 표의 PT 열 채움, 렌더링·본문 컨트롤 결정 기록(Rev 1.1)</td></tr>
+    <tr><td>P1</td><td>7장 명세 전체 재현(메모·목록·메뉴·확인 카드·테마·띠·DPI)</td><td>시각 회귀 매트릭스 통과(허용 차이 목록 승인), F-01~F-15, F-25, F-28 통과</td></tr>
+    <tr><td>P2</td><td>EDIT 통합, 제목 이름 변경, Ctrl+휠, 한글 IME</td><td>IME 체크리스트 100 %, 입력 지연 p95 ≤ 4 ms</td></tr>
+    <tr><td>P3</td><td>SQLite 스키마, 저장 스레드, 생성·닫기·삭제 규칙</td><td>14.2 강제 종료 테스트 통과, 저장 지연 ≤ 300 ms</td></tr>
+    <tr><td>P4</td><td>트레이, 앵커, 단일 인스턴스, 자동 실행, 첫 실행</td><td>F-16~F-20 통과, 탐색기 재시작 후 트레이 복구</td></tr>
+    <tr><td>P5</td><td>백업·무결성 검사·복원, v1·StickyMemo 가져오기</td><td>손상 주입 테스트 통과, 실데이터 사본 마이그레이션 왕복 일치</td></tr>
+    <tr><td>P6</td><td>프로파일링·최적화</td><td>13.1 목표 전부 충족</td></tr>
+    <tr><td>P7</td><td>NSIS 설치 관리자, 호환 매트릭스, 72 h 상주</td><td>18장 합격 기준 전부 충족</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================ 18 ============================ -->
+<h2 id="s18"><span class="no">18.</span>Acceptance Criteria</h2>
+<table>
+  <thead><tr><th style="width:9%">ID</th><th style="width:20%">영역</th><th>기준 <span class="T">목표</span></th><th style="width:20%">검증</th></tr></thead>
+  <tbody>
+    <tr><td>AC-F</td><td>기능 동등성</td><td>F-01 ~ F-28 전부 v1과 동일 동작. 7.4절 차이 항목은 사용자 승인된 형태로만 허용</td><td>UI 자동 + 수동</td></tr>
+    <tr><td>AC-P1</td><td>프로세스</td><td>실행 중 프로세스 1개, 자식 프로세스 0개</td><td>프로세스 트리</td></tr>
+    <tr><td>AC-P2</td><td>메모리</td><td>개인 메모리 트레이만 ≤ 3 MB, 메모 1개 ≤ 6 MB, 10개 ≤ 12 MB, 50개 ≤ 25 MB</td><td>13.1 방법, 3회 중앙값</td></tr>
+    <tr><td>AC-P3</td><td>CPU</td><td>유휴 ≤ 0.02 %(1코어), 타이핑(초당 17자) ≤ 3 %</td><td>13.1</td></tr>
+    <tr><td>AC-P4</td><td>응답</td><td>메모 1개 표시 ≤ 0.10 s, 10개 ≤ 0.20 s, 입력 지연 p95 ≤ 4 ms, WM_PAINT ≤ 1 ms</td><td>QPC 계측</td></tr>
+    <tr><td>AC-S1</td><td>장시간 안정</td><td>72 h 상주 후 개인 메모리 증가 ≤ 1 MB, 핸들·GDI·USER 개체 증가 ≤ 5, 크래시 0</td><td>14.1 장시간</td></tr>
+    <tr><td>AC-D1</td><td>데이터 내구성</td><td>강제 종료 시 손실 ≤ 마지막 300 ms 입력, DB 열기 실패 0 %</td><td>14.2</td></tr>
+    <tr><td>AC-D2</td><td>마이그레이션</td><td>v1 데이터 전 필드 일치(정규화 규칙 제외), notes.json SHA-256 불변</td><td>14.2</td></tr>
+    <tr><td>AC-D3</td><td>복구</td><td>손상 DB 감지 100 %, 최신 정상 백업 자동 복원, 원본 보관</td><td>손상 주입</td></tr>
+    <tr><td>AC-C1</td><td>호환</td><td>Windows 10 22H2, Windows 11 23H2 이상, DPI 100/125/150/200 %, 혼합 DPI 2모니터</td><td>매트릭스</td></tr>
+    <tr><td>AC-B1</td><td>배포</td><td>설치 파일 ≤ 1.5 MiB, exe ≤ 2.5 MB, 외부 런타임 설치 불필요</td><td>파일 크기</td></tr>
+    <tr><td>AC-Q1</td><td>품질</td><td><code>cargo clippy</code> 경고 0, 단위·통합 테스트 100 % 통과, unsafe 블록마다 안전성 주석</td><td>CI</td></tr>
+  </tbody>
+</table>
+
+<!-- ============================ 19 ============================ -->
+<h2 id="s19"><span class="no">19.</span>Technical References</h2>
+<table class="small">
+  <thead><tr><th style="width:36%">문서</th><th>본 보고서 관련 내용</th></tr></thead>
+  <tbody>
+    <tr><td>Microsoft Learn — Win32 "Window Classes", "Window Procedures", "Using Messages and Message Queues"</td><td>5·6·11장 창 클래스, WndProc, 메시지 루프</td></tr>
+    <tr><td>Microsoft Learn — <code>WM_NCCALCSIZE</code>, <code>WM_NCHITTEST</code>, <code>WM_GETMINMAXINFO</code>, <code>WM_EXITSIZEMOVE</code></td><td>6.2절 프레임 없는 창</td></tr>
+    <tr><td>Microsoft Learn — "Edit Controls" (Edit Control Styles, <code>EM_SETLIMITTEXT</code>, <code>EN_CHANGE</code>, <code>EM_SETCUEBANNER</code>)</td><td>6.4·7.2절</td></tr>
+    <tr><td>Microsoft Learn — "Rich Edit Controls" (<code>TM_PLAINTEXT</code>, <code>EM_SETUNDOLIMIT</code>)</td><td>PT-C</td></tr>
+    <tr><td>Microsoft Learn — "Input Method Manager", "Text Services Framework"</td><td>6.4절, R2</td></tr>
+    <tr><td>Microsoft Learn — <code>Shell_NotifyIconW</code>, <code>NOTIFYICONDATAW</code>, "TaskbarCreated"</td><td>6.5절 트레이</td></tr>
+    <tr><td>Microsoft Learn — "High DPI Desktop Application Development on Windows", <code>WM_DPICHANGED</code></td><td>6.5절, R4</td></tr>
+    <tr><td>Microsoft Learn — <code>DwmSetWindowAttribute</code> (<code>DWMWA_WINDOW_CORNER_PREFERENCE</code>)</td><td>6.2절 모서리</td></tr>
+    <tr><td>Microsoft Learn — "Direct2D", "DirectWrite", "Direct2D and GDI Interoperability"</td><td>6.7절 PT-B/B′</td></tr>
+    <tr><td>Microsoft Learn — <code>GetGuiResources</code>, <code>GetProcessMemoryInfo</code>, Windows Performance Recorder</td><td>13장 측정</td></tr>
+    <tr><td>Microsoft Learn — "WebView2 process model", "Browser arguments"</td><td>3.2·3.8절 v1 분석</td></tr>
+    <tr><td>SQLite 문서 — "Write-Ahead Logging", "PRAGMA synchronous", "VACUUM INTO", "PRAGMA quick_check", "Atomic Commit"</td><td>10·12장</td></tr>
+    <tr><td>Rust crates — <code>windows-sys</code>, <code>windows</code>, <code>rusqlite</code>, <code>serde_json</code></td><td>4장</td></tr>
+    <tr><td>본 저장소 — <code>src-tauri/src/*.rs</code>, <code>ui/*</code>, 측정 스크립트(부록 A.4)</td><td>3장 사실 근거</td></tr>
+  </tbody>
+</table>
+<p class="small">문서 제목은 Microsoft Learn·SQLite 공식 문서의 표제를 기준으로 했다. URL은 버전에 따라 바뀌므로 표제로 검색해 확인한다. 각 API의 세부 동작 중 <span class="U">미확인</span>으로 표시한 항목은 P0–P2에서 실제 동작으로 확인한다.</p>
+
+<!-- ============================ 20 ============================ -->
+<h2 id="s20"><span class="no">20.</span>Appendix</h2>
+<h3>A.1 기능 추적표 (F-xx → 설계 → 테스트)</h3>
+<table class="small">
+  <thead><tr><th style="width:7%">ID</th><th style="width:27%">v2 구현 위치</th><th style="width:9%">단계</th><th>테스트</th></tr></thead>
+  <tbody>
+    <tr><td>F-01</td><td>ui::note 생성, WM_NCCALCSIZE, WM_PAINT 테두리</td><td>P0/P1</td><td>창 크기·최소 크기·테두리 픽셀</td></tr>
+    <tr><td>F-02</td><td>render 띠 그리기, App::set_band, 접힘 높이</td><td>P1</td><td>3모드 × 테마 2 스크린샷, 접힘 높이 34/38</td></tr>
+    <tr><td>F-03</td><td>제목 GDI 텍스트 + 이름 변경 EDIT</td><td>P2</td><td>Enter/Esc/포커스 이탈, IME 조합 중 확정</td></tr>
+    <tr><td>F-04</td><td>본문 EDIT, 플레이스홀더 그리기</td><td>P2</td><td>평문 붙여넣기, 200,000자</td></tr>
+    <tr><td>F-05</td><td>TrackMouseEvent, 도구 상태</td><td>P1</td><td>hover/포커스 표시</td></tr>
+    <tr><td>F-06</td><td>WM_NCHITTEST HTCAPTION(상단 포함)</td><td>P0</td><td>끌기 이동량, 상단 가장자리 크기 불변</td></tr>
+    <tr><td>F-07</td><td>WM_NCLBUTTONDBLCLK, WM_GETMINMAXINFO</td><td>P1</td><td>접기/펴기 높이 복원</td></tr>
+    <tr><td>F-08</td><td>팝업 색 점, App::take_color</td><td>P1</td><td>순환 배정, 체크 표시</td></tr>
+    <tr><td>F-09 / F-10</td><td>App::new_note / close_note, 가속기</td><td>P3</td><td>+28 px, 빈 메모 삭제, Ctrl+N/W</td></tr>
+    <tr><td>F-11</td><td>popup::confirm_delete, App::delete_note</td><td>P3</td><td>유지/삭제/Esc, 빈 메모 즉시</td></tr>
+    <tr><td>F-12 / F-13</td><td>SetWindowPos(HWND_TOPMOST), EDIT 서브클래스 휠</td><td>P1/P2</td><td>Z순서, 10–32 경계</td></tr>
+    <tr><td>F-14</td><td>render Palette 교체, 전 창 무효화, WM_CTLCOLOREDIT</td><td>P1</td><td>즉시 반영, 첫 프레임 배경색</td></tr>
+    <tr><td>F-15</td><td>ui::list</td><td>P1/P3</td><td>검색·정렬·키보드·빈 문구·흐림</td></tr>
+    <tr><td>F-16 / F-17 / F-18</td><td>shell::tray / anchor / 단일 인스턴스</td><td>P4</td><td>클릭·메뉴·토글·아이콘 숨김·두 번째 실행</td></tr>
+    <tr><td>F-19 / F-20</td><td>autostart(v1), App 첫 실행</td><td>P4</td><td>레지스트리, 포커스 미탈취, 1회만</td></tr>
+    <tr><td>F-21 / F-22</td><td>store Writer, 백업·복구</td><td>P3/P5</td><td>14.2 전체</td></tr>
+    <tr><td>F-23 / F-27</td><td>platform::fit_rect, 시작 복원</td><td>P1/P3</td><td>모니터 분리, 상태 복원</td></tr>
+    <tr><td>F-24</td><td>store 가져오기(v1 import.rs)</td><td>P5</td><td>형식 1·2, 원본 불변</td></tr>
+    <tr><td>F-25 / F-26 / F-28</td><td>팝업 위치 규칙 / EDIT IME / EDIT 컨텍스트 메뉴</td><td>P1/P2</td><td>작은 창 메뉴, IME 체크리스트, 우클릭</td></tr>
+  </tbody>
+</table>
+
+<h3>A.2 v2 소스 구성 (계획)</h3>
+<pre>gaeunmemo2/
+  Cargo.toml           [profile.release] opt-level="z", lto=true, codegen-units=1, strip=true, panic="abort"
+  build.rs             리소스(.ico, 매니페스트: PerMonitorV2, comctl32 v6, UTF-8 코드 페이지)
+  src/main.rs          단일 인스턴스, DPI 인식, 메시지 루프
+  src/app.rs           App 상태·명령
+  src/ui/{note,list,popup,frame}.rs   창 프로시저, 히트 테스트, 레이아웃
+  src/render/{gdi,icons,palette}.rs   자원 캐시, 그리기 원시 함수 [d2d.rs 조건부]
+  src/shell/{tray,anchor,instance}.rs
+  src/store/{writer,schema,recover,import_v1}.rs   v1 import.rs·model.rs 이식
+  src/platform/{dpi,monitor,dwm,autostart}.rs      v1 autostart.rs·fit_rect 이식
+  tests/               통합 테스트(저장·마이그레이션·강제 종료)
+  tools/make_icon.py   v1 재사용 + DPI별 도구 아이콘</pre>
+
+<h3 id="s20-c">A.3 구현 체크리스트</h3>
+<div class="grid2 small">
+<div>
+<b>P0 — 기반</b>
+<ul>
+  <li>☐ 매니페스트(PerMonitorV2, comctl32 v6), <code>SetProcessDpiAwarenessContext</code> 확인</li>
+  <li>☐ GM_Note 등록·생성, <code>WM_NCCALCSIZE</code>/<code>WM_NCHITTEST</code></li>
+  <li>☐ 다중 창 레지스트리, 50개 생성·파괴 누수 0</li>
+  <li>☐ PT-A/PT-B/PT-B′/PT-C 빌드 기능 플래그, 측정 하네스</li>
+  <li>☐ 결과 기록 → Rev 1.1</li>
+</ul>
+<b>P1 — UI</b>
+<ul>
+  <li>☐ 테마 팔레트(표 3-4) 상수화, 치수(표 3-5) 상수화</li>
+  <li>☐ 띠 3모드, 테두리, 제목 줄, 도구 4종 + hover</li>
+  <li>☐ ⋯ 팝업(제목 수정/색/띠/테마/목록/삭제), 소형 배치</li>
+  <li>☐ 확인 카드(유지/삭제, Esc, 기본 포커스)</li>
+  <li>☐ 목록 창(헤더, 검색, 행, 정렬, 빈 문구, 우클릭)</li>
+  <li>☐ DPI 변경 재배치, 시각 회귀 매트릭스</li>
+</ul>
+<b>P2 — 텍스트·IME</b>
+<ul>
+  <li>☐ 본문 EDIT(평문, 200,000자, CRLF↔LF)</li>
+  <li>☐ 제목 이름 변경 EDIT(Enter/Esc/포커스 이탈)</li>
+  <li>☐ Ctrl+휠 글자 크기, Ctrl+N/W 가속기</li>
+  <li>☐ 한글 IME 체크리스트: 조합 중 저장·닫기·창 이동·접기, 한자 변환, 2벌식/3벌식</li>
+</ul>
+</div>
+<div>
+<b>P3 — 저장</b>
+<ul>
+  <li>☐ 스키마 v1, PRAGMA 설정, prepared statement 캐시</li>
+  <li>☐ Writer 스레드 + plan_write(v1) + id별 병합</li>
+  <li>☐ 생성·닫기(빈 메모 삭제)·삭제 규칙</li>
+  <li>☐ 강제 종료 테스트 0/100/350 ms</li>
+</ul>
+<b>P4 — 셸</b>
+<ul>
+  <li>☐ Shell_NotifyIcon v4, TaskbarCreated 재등록, 메뉴</li>
+  <li>☐ 앵커 창(토글, 창 없을 때 숨김), 세션 종료 flush</li>
+  <li>☐ 단일 인스턴스(뮤텍스 + WM_COPYDATA), 자동 실행·첫 실행</li>
+</ul>
+<b>P5 — 복구·마이그레이션</b>
+<ul>
+  <li>☐ quick_check, 백업 7개(VACUUM INTO), 손상 시 복원</li>
+  <li>☐ v1 notes.json 가져오기(SHA-256 기록, 원본 불변)</li>
+  <li>☐ StickyMemo 형식 1·2 가져오기(v1 테스트 이식)</li>
+  <li>☐ <code>--export-v1</code> 지원 도구(제안 승인 시)</li>
+</ul>
+<b>P6–P7 — 최적화·배포</b>
+<ul>
+  <li>☐ 13.1 지표 전부 측정·목표 충족</li>
+  <li>☐ NSIS 스크립트, 기존 인스턴스 종료 후 교체</li>
+  <li>☐ 호환 매트릭스, 72 h 상주, 18장 전 항목</li>
+</ul>
+</div>
+</div>
+
+<h3>A.4 기준선 측정 스크립트 (요지)</h3>
+<pre># 1) 테스트 데이터: 메모 N개(열림)로 notes.json 생성, 실데이터는 사전 백업 후 측정 종료 시 복원
+# 2) gaeunmemo.exe 실행 → 8 s 대기
+# 3) Win32_Process로 gaeunmemo.exe의 하위 프로세스 트리 수집 → 명령줄 --type=…로 종류 분류
+#    Private = PrivateMemorySize64, WS = WorkingSet64, Handles, Threads, GetGuiResources(0/1)
+# 4) 유휴: 30 s 동안 트리 전체 TotalProcessorTime 증가량 / 경과 시간
+# 5) 타이핑: 앵커 창에 WM_SYSCOMMAND(SC_RESTORE)로 메모를 앞으로 → 본문 클릭 → SendKeys 'a' × 200 (20 ms 간격)
+# 6) GPU 켬 변형: BROWSER_ARGS에서 --disable-gpu --disable-gpu-compositing만 제거한 빌드로 동일 실행
+#    (측정 후 소스 원상 복구, 설치본 교체 없음)</pre>
+
+<h3>A.5 측정 원자료 (2026-11-13)</h3>
+<table class="small">
+  <thead><tr><th style="width:22%">구성</th><th class="num">메모</th><th class="num">개인 합계 MB</th><th class="num">프로세스</th><th class="num">유휴 %</th><th class="num">타이핑 %</th><th class="num">타이핑 구간 s</th></tr></thead>
+  <tbody>
+    <tr><td>v1 GPU 끔 (설치본)</td><td class="num">1</td><td class="num">99.1</td><td class="num">7</td><td class="num">1.546</td><td class="num">28.25</td><td class="num">11.5</td></tr>
+    <tr><td>v1 GPU 끔 (설치본)</td><td class="num">10</td><td class="num">140.0</td><td class="num">7</td><td class="num">1.701</td><td class="num">31.46</td><td class="num">11.3</td></tr>
+    <tr><td>v1 GPU 켬 (임시 빌드)</td><td class="num">1</td><td class="num">159.3</td><td class="num">7</td><td class="num">1.750</td><td class="num">32.05</td><td class="num">10.3</td></tr>
+    <tr><td>v1 GPU 켬 (임시 빌드)</td><td class="num">10</td><td class="num">278.6</td><td class="num">7</td><td class="num">1.443</td><td class="num">35.60</td><td class="num">10.3</td></tr>
+    <tr><td colspan="7">시작 시간(창 visible까지, 2회): 트레이만 0.309 / 0.132 s, 메모 1개 0.277 / 0.109 s, 메모 10개 2.043 / 1.869 s. 강제 종료 테스트(v1): 입력 0 ms 후 kill → 첫 글자까지만 보존, 350 ms 후 kill → 전부 보존. opt-level 비교: "z" 2,976,768 B / "s" 3,456,000 B.</td></tr>
+  </tbody>
+</table>
+<p class="small">측정 한계: 측정 횟수가 1–2회로 적고, CPU 측정 구간이 30 s(유휴)·약 10 s(타이핑)로 짧다. 13.2절 표준 절차(3회 중앙값, 60 s)로 P0에서 재측정해 Rev 1.1에 반영한다.</p>
+
+</body>
+</html>

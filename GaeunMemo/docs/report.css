@@ -1,0 +1,78 @@
+@page {
+  size: A4 portrait;
+  margin: 15mm 11mm 13mm 11mm;
+  @top-left { content: "GaeunMemo 2.0 — Native Rewrite 기술 분석·설계 보고서"; font: 7.5pt "Malgun Gothic"; color: #555; vertical-align: bottom; padding-bottom: 2mm; }
+  @top-right { content: "GM2-TDR-001 · Rev 1.0 · 2026-11-13"; font: 7.5pt "Malgun Gothic"; color: #555; vertical-align: bottom; padding-bottom: 2mm; }
+  @bottom-left { content: "Phase 1 산출물 — 분석·설계 (구현 전)"; font: 7.5pt "Malgun Gothic"; color: #777; vertical-align: top; padding-top: 2mm; }
+  @bottom-right { content: counter(page) " / " counter(pages); font: 8pt "Malgun Gothic"; color: #333; vertical-align: top; padding-top: 2mm; }
+}
+@page :first {
+  @top-left { content: none; } @top-right { content: none; } @bottom-left { content: none; }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body { margin: 0; font: 9.2pt/1.45 "Malgun Gothic", sans-serif; color: #1b1b1b; }
+p { margin: 0 0 4pt; text-align: justify; word-break: keep-all; }
+h1, h2, h3, h4 { font-weight: 700; color: #111; break-after: avoid; word-break: keep-all; }
+h2 { font-size: 13pt; margin: 10pt 0 5pt; padding: 2pt 0 2pt 6pt; border-left: 4pt solid #534AB7; background: #F2F1FB; }
+h2 .no { color: #534AB7; margin-right: 4pt; }
+h3 { font-size: 10.4pt; margin: 8pt 0 3pt; border-bottom: 0.6pt solid #bbb; padding-bottom: 1pt; }
+h4 { font-size: 9.4pt; margin: 6pt 0 2pt; color: #333; }
+ul, ol { margin: 0 0 4pt; padding-left: 13pt; }
+li { margin: 0 0 1pt; }
+code, .mono { font-family: Consolas, "Malgun Gothic", monospace; font-size: 8.2pt; }
+code { background: #F1F1EE; padding: 0 2pt; border-radius: 1.5pt; }
+pre { font: 7.9pt/1.35 Consolas, "Malgun Gothic", monospace; background: #F6F6F3; border: 0.5pt solid #ccc; padding: 4pt 6pt; margin: 2pt 0 5pt; white-space: pre-wrap; word-break: break-all; break-inside: avoid; }
+
+table { width: 100%; border-collapse: collapse; margin: 2pt 0 6pt; font-size: 8.3pt; line-height: 1.32; table-layout: fixed; break-inside: auto; }
+thead { display: table-header-group; }
+tr { break-inside: avoid; }
+th, td { border: 0.5pt solid #9a9a9a; padding: 2pt 3.5pt; vertical-align: top; word-break: keep-all; overflow-wrap: anywhere; }
+th { background: #2d2a4a; color: #fff; font-weight: 700; text-align: left; }
+tbody tr:nth-child(even) td { background: #F7F7F5; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.c, th.c { text-align: center; }
+caption { caption-side: top; text-align: left; font-weight: 700; font-size: 8.4pt; padding: 0 0 2pt; color: #333; }
+
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8pt; }
+.grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6pt; }
+.box { border: 0.6pt solid #888; padding: 4pt 6pt; margin: 3pt 0 6pt; break-inside: avoid; }
+.box h4 { margin-top: 0; }
+.note { border-left: 3pt solid #B5D4F4; background: #F3F8FD; padding: 3pt 6pt; margin: 3pt 0 6pt; font-size: 8.6pt; break-inside: avoid; }
+.warn { border-left: 3pt solid #D85A30; background: #FDF3EF; padding: 3pt 6pt; margin: 3pt 0 6pt; font-size: 8.6pt; break-inside: avoid; }
+.dec { border: 0.6pt solid #534AB7; background: #FAFAFF; padding: 3pt 6pt; margin: 3pt 0 6pt; font-size: 8.6pt; break-inside: avoid; }
+.dec b.t { color: #534AB7; }
+figure { margin: 3pt 0 7pt; break-inside: avoid; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { font-size: 8pt; color: #444; margin-top: 2pt; text-align: center; }
+
+/* value kinds — every number in this report is one of these */
+.M, .E, .T, .U { display: inline-block; font-size: 6.6pt; font-weight: 700; padding: 0 2.5pt; border-radius: 2pt; line-height: 1.5; vertical-align: 0.5pt; }
+.M { background: #1D9E75; color: #fff; }   /* 측정값 */
+.E { background: #BA7517; color: #fff; }   /* 예상값 */
+.T { background: #534AB7; color: #fff; }   /* 목표값 */
+.U { background: #888; color: #fff; }      /* 미확인 */
+
+/* cover */
+.cover { display: flex; flex-direction: column; }
+.cover .band { height: 4mm; background: linear-gradient(90deg, #AFA9EC 0 16.66%, #F4C0D1 0 33.33%, #9FE1CB 0 50%, #F6C9A0 0 66.66%, #B5D4F4 0 83.33%, #F3E9C6 0); }
+.cover h1 { font-size: 19pt; margin: 6mm 0 2mm; line-height: 1.2; }
+.cover .sub { font-size: 10pt; color: #333; margin-bottom: 4mm; }
+.cover table { width: 100%; font-size: 8.6pt; }
+.cover .abstract { margin-top: 2mm; }
+td.num .M, td.num .E, td.num .T { margin-left: 2pt; }
+table.nobadge td { white-space: normal; }
+
+/* table of contents */
+.toc { columns: 2; column-gap: 10mm; font-size: 9pt; margin-bottom: 4mm; }
+.toc a { color: inherit; text-decoration: none; display: flex; gap: 3pt; break-inside: avoid; padding: 1pt 0; }
+.toc a .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toc a .dots { flex: 1; border-bottom: 0.6pt dotted #888; margin-bottom: 3pt; min-width: 8pt; }
+.toc a .pn { min-width: 14pt; text-align: right; font-variant-numeric: tabular-nums; }
+.toc a.sub { padding-left: 10pt; font-size: 8.3pt; color: #333; }
+
+.pb { break-before: page; }
+.keep { break-inside: avoid; }
+.small { font-size: 8pt; }
+.legend { font-size: 7.8pt; color: #333; }

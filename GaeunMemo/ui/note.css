@@ -1,0 +1,79 @@
+body { display: flex; flex-direction: column; }
+
+.bar {
+  height: var(--bar);
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 5px 0 12px;
+}
+
+/* "제목 줄" band mode: the whole title bar takes the note colour */
+[data-band="full"] .bar { background: var(--accent); }
+[data-band="full"] .title { color: var(--color-on-accent); }
+[data-band="full"] .title::placeholder { color: var(--color-on-accent-soft); }
+[data-band="full"] .title:not([readonly]) { background: color-mix(in srgb, var(--accent) 70%, #FFFFFF); }
+[data-band="full"] .tool { color: var(--color-on-accent-soft); }
+[data-band="full"] .tool:hover,
+[data-band="full"] .tool[aria-pressed="true"] { color: var(--color-on-accent); }
+[data-band="full"] .tool:hover { background: color-mix(in srgb, var(--accent) 80%, #000000); }
+[data-band="full"] .tool:focus-visible { outline-color: var(--color-on-accent); }
+
+.title {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font: 700 13.5px/26px var(--font-body);
+  text-overflow: ellipsis;
+  caret-color: var(--color-ink);
+}
+.title::placeholder { color: var(--color-muted); font-weight: 700; }
+.title[readonly] { pointer-events: none; }
+.title:not([readonly]) {
+  margin-left: -6px;
+  padding: 0 6px;
+  background: var(--color-paper-2);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* tools appear only under the mouse (or keyboard focus); hidden, they take no
+   room, so the title can use the whole bar */
+.tools { display: none; }
+body:hover .tools,
+.tools:has(:focus-visible) { display: flex; }
+
+.body {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  margin: 0;
+  padding: 4px 12px 12px;
+  border: 0;
+  border-radius: 0;
+  resize: none;
+  background: transparent;
+  color: var(--color-ink);
+  font: 400 var(--fs, 14px)/1.6 var(--font-body);
+  caret-color: var(--color-ink);
+  -webkit-user-select: text;
+  user-select: text;
+}
+.body::placeholder { color: var(--color-muted); }
+[data-folded] .body { display: none; }
+
+#menu { top: var(--bar); right: 5px; }
+[data-band="thin"] #menu { top: calc(var(--bar) + 4px); }
+#menu.compact { top: 2px; }
+#menu.compact .menu-item { height: 20px; }
+#menu.compact .swatches { padding: 2px 12px; }
+
+/* "띠 모양 ... 제목 줄": one row, each click moves to the next mode */
+.menu-item.has-value { justify-content: space-between; gap: 16px; }
+.menu-value { color: var(--color-muted); }
