@@ -1,18 +1,24 @@
 @page {
   size: A4 portrait;
   margin: 15mm 11mm 13mm 11mm;
-  @top-left { content: "GaeunMemo 2.0 — Native Rewrite 기술 분석·설계 보고서"; font: 7.5pt "Malgun Gothic"; color: #555; vertical-align: bottom; padding-bottom: 2mm; }
-  @top-right { content: "GM2-TDR-001 · Rev 1.0 · 2026-11-13"; font: 7.5pt "Malgun Gothic"; color: #555; vertical-align: bottom; padding-bottom: 2mm; }
-  @bottom-left { content: "Phase 1 산출물 — 분석·설계 (구현 전)"; font: 7.5pt "Malgun Gothic"; color: #777; vertical-align: top; padding-top: 2mm; }
-  @bottom-right { content: counter(page) " / " counter(pages); font: 8pt "Malgun Gothic"; color: #333; vertical-align: top; padding-top: 2mm; }
+  @top-left { content: "GaeunMemo 2.0 — Native Rewrite 기술 분석·설계 보고서"; font: 7.5pt "Malgun Gothic", "NanumGothic", "Noto Sans CJK KR", sans-serif; color: #555; vertical-align: bottom; padding-bottom: 2mm; }
+  @top-right { content: "GM2-TDR-001 · Rev 1.0 · 2026-11-13"; font: 7.5pt "Malgun Gothic", "NanumGothic", "Noto Sans CJK KR", sans-serif; color: #555; vertical-align: bottom; padding-bottom: 2mm; }
+  @bottom-left { content: "Phase 1 산출물 — 분석·설계 (구현 전)"; font: 7.5pt "Malgun Gothic", "NanumGothic", "Noto Sans CJK KR", sans-serif; color: #777; vertical-align: top; padding-top: 2mm; }
+  @bottom-right { content: counter(page) " / " counter(pages); font: 8pt "Malgun Gothic", "NanumGothic", "Noto Sans CJK KR", sans-serif; color: #333; vertical-align: top; padding-top: 2mm; }
 }
 @page :first {
   @top-left { content: none; } @top-right { content: none; } @bottom-left { content: none; }
 }
 
+/* Off Windows there is no Consolas: JetBrains Mono, scaled to Consolas' advance width
+   (0.55 em vs 0.60 em) so tables wrap the same way. Korean fonts draw U+005C as ₩, so
+   Windows paths in figures use this face too. */
+@font-face { font-family: "GM JBMono"; src: local("JetBrains Mono"), local("JetBrainsMono-Regular"); font-weight: 400; size-adjust: 91.7%; }
+@font-face { font-family: "GM JBMono"; src: local("JetBrains Mono Bold"), local("JetBrainsMono-Bold"); font-weight: 700; size-adjust: 91.7%; }
+
 * { box-sizing: border-box; }
 html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-body { margin: 0; font: 9.2pt/1.45 "Malgun Gothic", sans-serif; color: #1b1b1b; }
+body { margin: 0; font: 9.2pt/1.45 "Malgun Gothic", "NanumGothic", "Noto Sans CJK KR", sans-serif; color: #1b1b1b; }
 p { margin: 0 0 4pt; text-align: justify; word-break: keep-all; }
 h1, h2, h3, h4 { font-weight: 700; color: #111; break-after: avoid; word-break: keep-all; }
 h2 { font-size: 13pt; margin: 10pt 0 5pt; padding: 2pt 0 2pt 6pt; border-left: 4pt solid #534AB7; background: #F2F1FB; }
@@ -21,9 +27,9 @@ h3 { font-size: 10.4pt; margin: 8pt 0 3pt; border-bottom: 0.6pt solid #bbb; padd
 h4 { font-size: 9.4pt; margin: 6pt 0 2pt; color: #333; }
 ul, ol { margin: 0 0 4pt; padding-left: 13pt; }
 li { margin: 0 0 1pt; }
-code, .mono { font-family: Consolas, "Malgun Gothic", monospace; font-size: 8.2pt; }
+code, .mono { font-family: Consolas, "GM JBMono", "NanumGothicCoding", "Malgun Gothic", monospace; font-size: 8.2pt; }
 code { background: #F1F1EE; padding: 0 2pt; border-radius: 1.5pt; }
-pre { font: 7.9pt/1.35 Consolas, "Malgun Gothic", monospace; background: #F6F6F3; border: 0.5pt solid #ccc; padding: 4pt 6pt; margin: 2pt 0 5pt; white-space: pre-wrap; word-break: break-all; break-inside: avoid; }
+pre { font: 7.9pt/1.35 Consolas, "GM JBMono", "NanumGothicCoding", "Malgun Gothic", monospace; background: #F6F6F3; border: 0.5pt solid #ccc; padding: 4pt 6pt; margin: 2pt 0 5pt; white-space: pre-wrap; word-break: break-all; break-inside: avoid; }
 
 table { width: 100%; border-collapse: collapse; margin: 2pt 0 6pt; font-size: 8.3pt; line-height: 1.32; table-layout: fixed; break-inside: auto; }
 thead { display: table-header-group; }
@@ -35,7 +41,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.c, th.c { text-align: center; }
 caption { caption-side: top; text-align: left; font-weight: 700; font-size: 8.4pt; padding: 0 0 2pt; color: #333; }
 
-.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8pt; }
+/* Two-column blocks are floats, not CSS grid: Chromium does not grow a grid row when a
+   table inside it is pushed across a page break, so the next block overlapped it. */
+.grid2 { display: flow-root; }
+.grid2 > * { float: left; width: calc(50% - 4pt); margin-top: 0; }
+.grid2 > :nth-child(2n) { margin-left: 8pt; }
+.grid2 > :nth-child(2n+1) { clear: left; }
+.grid2.keep { break-inside: avoid; }  /* short blocks whose first float fragment would otherwise be empty */
 .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6pt; }
 .box { border: 0.6pt solid #888; padding: 4pt 6pt; margin: 3pt 0 6pt; break-inside: avoid; }
 .box h4 { margin-top: 0; }

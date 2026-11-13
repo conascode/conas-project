@@ -1,4 +1,6 @@
-"""Builds docs/GaeunMemo2_Technical_Report.pdf from report.html with headless Edge.
+"""Builds docs/GaeunMemo2_Technical_Report.pdf from report.html with headless Edge
+on Windows, or Chromium through Node + Playwright elsewhere (headless Chromium's
+--print-to-pdf can hang in sandboxed Linux containers).
 
 Pass 1 prints the PDF, then reads the named destinations Chromium writes for
 each TOC link target to learn which page every section starts on. Pass 2 writes
@@ -18,10 +20,29 @@ TMP = DOCS / "_report_build.html"
 OUT = DOCS / "GaeunMemo2_Technical_Report.pdf"
 EDGE = r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
 
+PLAYWRIGHT_JS = r"""
+const {chromium} = require('playwright');
+(async () => {
+  const b = await chromium.launch();
+  const p = await b.newPage();
+  await p.goto(process.argv[1], {waitUntil: 'load'});
+  await p.evaluate(() => document.fonts.ready);
+  await p.pdf({path: process.argv[2], preferCSSPageSize: true, printBackground: true,
+               displayHeaderFooter: false, tagged: true});
+  await b.close();
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
 
 def print_pdf(html: Path, pdf: Path) -> None:
     if pdf.exists():
         pdf.unlink()
+    if sys.platform != "win32":
+        r = subprocess.run(["node", "-e", PLAYWRIGHT_JS, html.as_uri(), str(pdf)],
+                           capture_output=True, timeout=180)
+        if r.returncode or not pdf.exists():
+            sys.exit(f"Playwright did not produce a PDF\n{r.stderr.decode(errors='replace')[-2000:]}")
+        return
     profile = Path(__import__("tempfile").gettempdir()) / "gm-report-edge-profile"
     r = subprocess.run(
         [EDGE, "--headless=new", f"--user-data-dir={profile}", "--no-first-run",
