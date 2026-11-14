@@ -36,7 +36,7 @@ cargo tauri build     # 릴리스 exe + NSIS 설치 파일 (target/release/bundl
 | `src-tauri/src/autostart.rs` | HKCU Run 등록·해제, 옛 StickyMemo 항목 정리 |
 | `src-tauri/src/log.rs` | 시작·종료 진단 로그 |
 | `ui/` | `note.*`, `list.*`, 공통 `common.css`, `ui.js`, `boot.js` |
-| `docs/` | GaeunMemo 2.0 Native 재개발 기술 분석·설계 보고서(PDF, HTML 원본, 생성 스크립트) |
+| `docs/` | GaeunMemo 2.0 Native 재개발 기술 분석·설계 보고서 원본(HTML). PDF는 `python docs/build_pdf.py`로 생성 (저장소에는 넣지 않음) |
 | `tools/merge_claude_copy.ps1` | 다른 위치에 갈라진 notes.json 을 합치는 일회성 도구 |
 
 ## 데이터
