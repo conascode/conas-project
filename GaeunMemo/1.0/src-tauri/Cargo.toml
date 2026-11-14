@@ -1,6 +1,6 @@
 [package]
 name = "gaeunmemo"
-version = "0.1.0"
+version = "1.0.0"
 description = "GaeunMemo — desktop sticky notes"
 edition = "2021"
 publish = false
