@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-list"
+description = "Enables the open_list command without any pre-configured scope."
+commands.allow = ["open_list"]
+
+[[permission]]
+identifier = "deny-open-list"
+description = "Denies the open_list command without any pre-configured scope."
+commands.deny = ["open_list"]

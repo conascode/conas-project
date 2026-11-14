@@ -1,0 +1,139 @@
+body { display: flex; flex-direction: column; }
+
+.bar {
+  height: var(--bar);
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 5px 0 12px;
+}
+
+/* "제목 줄" band mode: the whole title bar takes the note colour */
+[data-band="full"] .bar { background: var(--accent); }
+[data-band="full"] .title { color: var(--color-on-accent); }
+[data-band="full"] .title::placeholder { color: var(--color-on-accent-soft); }
+[data-band="full"] .title:not([readonly]) { background: color-mix(in srgb, var(--accent) 70%, #FFFFFF); }
+[data-band="full"] .tool { color: var(--color-on-accent-soft); }
+[data-band="full"] .tool:hover,
+[data-band="full"] .tool[aria-pressed="true"] { color: var(--color-on-accent); }
+[data-band="full"] .tool:hover { background: color-mix(in srgb, var(--accent) 80%, #000000); }
+[data-band="full"] .tool:focus-visible { outline-color: var(--color-on-accent); }
+
+.title {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font: 700 13.5px/26px var(--font-body);
+  text-overflow: ellipsis;
+  caret-color: var(--color-ink);
+}
+.title::placeholder { color: var(--color-muted); font-weight: 700; }
+.title[readonly] { pointer-events: none; }
+.title:not([readonly]) {
+  margin-left: -6px;
+  padding: 0 6px;
+  background: var(--color-paper-2);
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/* tools appear only under the mouse (or keyboard focus); hidden, they take no
+   room, so the title can use the whole bar */
+.tools { display: none; }
+body:hover .tools,
+.tools:has(:focus-visible) { display: flex; }
+
+/* ---------- locked: padlock before the title, "✓ 복사됨" after a copy ---------- */
+
+.lock-ico { flex: none; color: var(--color-muted); }
+[data-band="full"] .lock-ico { color: var(--color-on-accent-soft); }
+.copied {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--color-muted);
+}
+[data-band="full"] .copied { color: var(--color-on-accent-soft); }
+.bar.show-copied .title,
+.bar.show-copied .lock-ico { display: none; }
+
+/* ---------- formatting row (전체화면 only) ---------- */
+
+.fmt {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--color-rule);
+}
+.fbtn {
+  min-width: 28px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  color: var(--color-muted);
+  transition: background-color var(--dur-micro) ease, color var(--dur-micro) ease;
+}
+.fbtn:hover { background: var(--color-paper-3); color: var(--color-ink); }
+.fbtn:active { background: var(--color-rule); }
+.fbtn[aria-pressed="true"] { background: var(--color-paper-3); color: var(--color-ink); }
+.fbtn .icon { width: 16px; height: 16px; }
+.fbtn .dot { fill: currentColor; stroke: none; }
+.fsep { width: 1px; height: 16px; margin: 0 5px; background: var(--color-rule); }
+
+/* ---------- body: formatted text ---------- */
+
+.body {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  margin: 0;
+  padding: 4px 12px 12px;
+  overflow-y: auto;
+  outline: none;
+  background: transparent;
+  color: var(--color-ink);
+  font: 400 var(--fs, 14px)/1.6 var(--font-body);
+  caret-color: var(--color-ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.body.is-empty::before {
+  content: attr(data-placeholder);
+  color: var(--color-muted);
+  pointer-events: none;
+}
+.body ul { margin: 0; padding-left: 1.3em; }
+.body img { display: block; max-width: 100%; height: auto; margin: 4px 0; }
+[data-folded] .body { display: none; }
+
+/* locked: no selection highlight at all — a click always copies the whole body */
+[data-locked] .body {
+  cursor: pointer;
+  caret-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+#menu { top: var(--bar); right: 5px; }
+[data-band="thin"] #menu { top: calc(var(--bar) + 4px); }
+#menu.compact { top: 2px; }
+#menu.compact .menu-item { height: 20px; }
+#menu.compact .swatches { padding: 2px 12px; }
+
+/* "띠 모양 ... 제목 줄": one row, each click moves to the next mode */
+.menu-item.has-value { justify-content: space-between; gap: 16px; }
+.menu-value { color: var(--color-muted); }

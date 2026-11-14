@@ -1,0 +1,30 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Only what the note and list windows use.",
+  "windows": ["note-*", "list"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "allow-note-get",
+    "allow-note-save",
+    "allow-note-set-color",
+    "allow-note-set-font",
+    "allow-note-toggle-pin",
+    "allow-note-toggle-fold",
+    "allow-note-new-near",
+    "allow-note-close",
+    "allow-note-delete",
+    "allow-note-add-image",
+    "allow-note-set-lock",
+    "allow-note-fullscreen",
+    "allow-band-set",
+    "allow-list-get",
+    "allow-list-open-note",
+    "allow-list-new",
+    "allow-list-close",
+    "allow-open-list",
+    "allow-theme-set"
+  ]
+}

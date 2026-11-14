@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-note-toggle-fold"
+description = "Enables the note_toggle_fold command without any pre-configured scope."
+commands.allow = ["note_toggle_fold"]
+
+[[permission]]
+identifier = "deny-note-toggle-fold"
+description = "Denies the note_toggle_fold command without any pre-configured scope."
+commands.deny = ["note_toggle_fold"]

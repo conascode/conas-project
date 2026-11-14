@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-note-fullscreen"
+description = "Enables the note_fullscreen command without any pre-configured scope."
+commands.allow = ["note_fullscreen"]
+
+[[permission]]
+identifier = "deny-note-fullscreen"
+description = "Denies the note_fullscreen command without any pre-configured scope."
+commands.deny = ["note_fullscreen"]

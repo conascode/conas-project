@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="ko" data-theme="light" data-band="thin">
+<head>
+<meta charset="utf-8">
+<!-- Note-window UI test: loads the real ui/note.html markup and scripts with a
+     fake app side. Serve the gaeunmemo folder (python -m http.server) and open
+     /tests/note_ui_test.html; results appear on the right. -->
+<title>note UI test</title>
+<link rel="stylesheet" href="../ui/common.css">
+<link rel="stylesheet" href="../ui/note.css">
+<style>body{width:380px;height:420px;border:1px solid #888}#out{position:fixed;left:400px;top:0;width:560px;font:12px/1.4 Consolas,monospace;white-space:pre-wrap}</style>
+</head>
+<body>
+<pre id="out">loading</pre>
+<script>
+// ---- fake app side: records what the page asks the app to do ----
+const NAME = '0123abcd-0123-4567-89ab-0123456789ab.png';
+window.calls = [];
+window.saves = [];
+const note = { title: '테스트', text: '', html: '', color: '#B5D4F4', pinned: false, folded: false, theme: 'light',
+  band: 'thin', fontSize: 14, palette: ['#AFA9EC','#F4C0D1','#9FE1CB','#F6C9A0','#B5D4F4','#F3E9C6'], locked: false, maximized: false };
+window.__TAURI__ = {
+  core: { invoke: async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
+    if (cmd === 'note_get') return note;
+    if (cmd === 'note_save') { saves.push(args); return null; }
+    if (cmd === 'note_add_image') return NAME;
+    if (cmd === 'note_set_lock') return args.locked;
+    return null;
+  } },
+  event: { listen: async () => () => {} },
+  window: { getCurrentWindow: () => ({ label: 'note-test', startDragging: async () => {} }) },
+};
+const PNG = new Uint8Array([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,0,0,0,0]);
+const pngFile = () => new File([PNG], 'a.png', { type: 'image/png' });
+</script>
+<script>
+(async function () {
+  // the real note page markup
+  const src = await (await fetch('../ui/note.html')).text();
+  const doc = new DOMParser().parseFromString(src, 'text/html');
+  for (const n of [...doc.body.childNodes]) document.body.insertBefore(document.importNode(n, true), document.getElementById('out'));
+  for (const s of ['../ui/ui.js', '../ui/rich.js', '../ui/note.js']) {
+    await new Promise((ok, bad) => { const e = document.createElement('script'); e.src = s; e.onload = ok; e.onerror = bad; document.head.appendChild(e); });
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  await sleep(300);
+
+  const out = [];
+  const t = (name, ok, info) => out.push((ok ? 'PASS ' : 'FAIL ') + name + (ok || info === undefined ? '' : '\n   ' + info));
+  const body = document.getElementById('body');
+  const last = () => saves[saves.length - 1] || {};
+  const caretEnd = () => { body.focus(); const r = document.createRange(); r.selectNodeContents(body); r.collapse(false); const s = getSelection(); s.removeAllRanges(); s.addRange(r); };
+  const paste = (fill) => { const dt = new DataTransfer(); fill(dt); body.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })); };
+
+  // 1. paste from a web page / Word: keep supported formatting only
+  caretEnd();
+  paste((dt) => {
+    dt.setData('text/html', '<p><span style="font-weight:700">굵게</span> <a href="https://x">링크</a><script>evil()<\/script> <span style="text-decoration:line-through">취소</span> <em>기울임</em></p><ol><li>하나</li></ol><img src="https://example.com/x.png" onerror="evil()">');
+    dt.setData('text/plain', '굵게 링크 취소 기울임 하나');
+  });
+  await sleep(150);
+  let h = last().html || '';
+  t('web paste keeps bold', h.includes('<b>굵게</b>'), h);
+  t('web paste keeps strike/italic/list', h.includes('<s>취소</s>') && h.includes('<i>기울임</i>') && h.includes('<ul><li>하나</li></ul>'), h);
+  t('web paste drops link/script/foreign img', !/<a|script|example\.com|onerror/.test(h) && h.includes('링크'), h);
+  t('plain mirror saved', (last().text || '').includes('굵게') && !(last().text || '').includes('<'), last().text);
+
+  // 2. Ctrl+Shift+V: text only
+  caretEnd();
+  body.dispatchEvent(new KeyboardEvent('keydown', { key: 'V', ctrlKey: true, shiftKey: true, bubbles: true }));
+  const before = (last().html || '').split('<b>').length;
+  paste((dt) => { dt.setData('text/html', '<b>평문만</b>'); dt.setData('text/plain', '평문만'); });
+  await sleep(150);
+  h = last().html || '';
+  t('Ctrl+Shift+V pastes text without formatting', h.includes('평문만') && h.split('<b>').length === before, h);
+
+  // 3. paste a picture (screenshot / image file)
+  caretEnd();
+  paste((dt) => dt.items.add(pngFile()));
+  await sleep(200);
+  const add = calls.filter((c) => c.cmd === 'note_add_image');
+  t('picture paste uploads bytes', add.length === 1 && add[0].args instanceof Uint8Array && add[0].args.length === PNG.length, JSON.stringify(add.map(a => a.args && a.args.length)));
+  t('upload names the note', add[0] && add[0].opts && add[0].opts.headers['x-gm-id'] === 'test', JSON.stringify(add[0] && add[0].opts));
+  let img = body.querySelector(`img[data-gm="${NAME}"]`);
+  t('picture shown with app URL', !!img && img.getAttribute('src') === 'http://gmimg.localhost/' + NAME, img && img.outerHTML);
+  h = last().html || '';
+  t('saved html keeps picture name, not URL', h.includes(`data-gm="${NAME}"`) && !h.includes('gmimg.localhost'), h);
+  t('picture fits note width', img && getComputedStyle(img).maxWidth === '100%', img && getComputedStyle(img).maxWidth);
+
+  // 4. picture copied from a browser (file + <img src=web>)
+  caretEnd();
+  paste((dt) => { dt.items.add(pngFile()); dt.setData('text/html', '<img src="https://example.com/cat.png">'); });
+  await sleep(200);
+  t('browser-copied picture is added', calls.filter((c) => c.cmd === 'note_add_image').length === 2, calls.filter((c) => c.cmd === 'note_add_image').length);
+
+  // 5. drag and drop a picture file
+  const dropDt = new DataTransfer(); dropDt.items.add(pngFile());
+  body.dispatchEvent(new DragEvent('drop', { dataTransfer: dropDt, bubbles: true, cancelable: true }));
+  await sleep(200);
+  t('dropped picture is added', calls.filter((c) => c.cmd === 'note_add_image').length === 3, calls.filter((c) => c.cmd === 'note_add_image').length);
+
+  // 6. 사진 버튼 (file picker)
+  const input = document.getElementById('img-file');
+  const fdt = new DataTransfer(); fdt.items.add(pngFile()); input.files = fdt.files;
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+  await sleep(200);
+  t('picture button adds picture', calls.filter((c) => c.cmd === 'note_add_image').length === 4, calls.filter((c) => c.cmd === 'note_add_image').length);
+  t('picker cleared for next use', input.value === '', input.value);
+
+  // 7. non-picture file is ignored
+  const n0 = calls.filter((c) => c.cmd === 'note_add_image').length;
+  caretEnd();
+  paste((dt) => dt.items.add(new File(['MZ'], 'a.exe', { type: 'application/x-msdownload' })));
+  await sleep(150);
+  t('non-picture file ignored', calls.filter((c) => c.cmd === 'note_add_image').length === n0);
+
+  // 8. lock
+  document.querySelector('[data-act="lock"]').click();
+  await sleep(200);
+  const ico = document.getElementById('lock-ico');
+  t('lock icon appears', !ico.hasAttribute('hidden') && getComputedStyle(ico).display !== 'none', ico.outerHTML.slice(0, 80) + ' display=' + getComputedStyle(ico).display);
+  t('body not editable when locked', body.contentEditable === 'false', body.contentEditable);
+  t('menu says 잠금 해제', document.getElementById('lock-btn').textContent === '잠금 해제');
+  t('delete / rename / colours disabled', document.querySelector('[data-act="delete"]').disabled && document.querySelector('[data-act="rename"]').disabled && [...document.querySelectorAll('.swatch')].every((s) => s.disabled));
+  const savesBefore = saves.length;
+  caretEnd();
+  paste((dt) => { dt.setData('text/plain', '잠금 중 붙여넣기'); dt.items.add(pngFile()); });
+  await sleep(200);
+  t('locked: paste does nothing', saves.length === savesBefore && !body.textContent.includes('잠금 중 붙여넣기'));
+  t('locked: text cannot be selected', getComputedStyle(body).userSelect === 'none', getComputedStyle(body).userSelect);
+  getSelection().selectAllChildren(body);
+  t('locked: select-all highlights nothing', getSelection().toString() === '', JSON.stringify(getSelection().toString().slice(0, 30)));
+  getSelection().removeAllRanges();
+
+  document.getElementById('out').textContent = out.join('\n') + '\n' + out.filter((x) => x.startsWith('PASS')).length + '/' + out.length + ' passed';
+  window.testDone = true;
+})().catch((e) => { document.getElementById('out').textContent = 'ERROR ' + e.stack; });
+</script>
+</body>
+</html>
