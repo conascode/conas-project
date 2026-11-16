@@ -89,6 +89,25 @@ pub fn notes() -> Vec<HWND> {
     NOTES.with(|n| n.borrow().clone())
 }
 
+/// Everything typed so far goes to the store now: an IME composition is finished, a
+/// rename ends, a waiting throttled save runs (tray 종료, session end).
+pub fn flush_all() {
+    for h in notes() {
+        unsafe {
+            let Some(s) = state_of(h) else { continue };
+            crate::win::ime_complete(s.body);
+            if !s.title_edit.is_null() {
+                end_rename(s, false);
+            }
+            if s.save_pending {
+                KillTimer(h, TIMER_SAVE);
+                s.save_pending = false;
+                serialize(s);
+            }
+        }
+    }
+}
+
 pub fn register_class() {
     unsafe {
         let name = wide(CLASS);
@@ -99,12 +118,13 @@ pub fn register_class() {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: GetModuleHandleW(std::ptr::null()),
-            hIcon: std::ptr::null_mut(),
+            // the app icon on the taskbar buttons and in Alt+Tab (F-17)
+            hIcon: crate::shell::app_icon(GetSystemMetrics(SM_CXICON)),
             hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
             hbrBackground: std::ptr::null_mut(),
             lpszMenuName: std::ptr::null(),
             lpszClassName: name.as_ptr(),
-            hIconSm: std::ptr::null_mut(),
+            hIconSm: crate::shell::app_icon(GetSystemMetrics(SM_CXSMICON)),
         };
         RegisterClassExW(&wc);
     }
@@ -167,6 +187,7 @@ pub fn open(id: u64, at: Option<(i32, i32)>, focus: bool) -> HWND {
         let title = wide(&taskbar_title(&n.title));
         let hwnd = CreateWindowExW(ex, wide(CLASS).as_ptr(), title.as_ptr(), style, x, y, w, h, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), Box::into_raw(state) as *const _);
         if hwnd.is_null() {
+            crate::log::write(&format!("note window: create failed ({})", windows_sys::Win32::Foundation::GetLastError()));
             return hwnd;
         }
         NOTES.with(|v| v.borrow_mut().push(hwnd));

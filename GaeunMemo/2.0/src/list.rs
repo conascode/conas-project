@@ -38,7 +38,16 @@ pub fn set_saved(rect: Option<(f64, f64, f64, f64)>) {
 fn logical_rect(h: HWND) -> Option<(f64, f64, f64, f64)> {
     unsafe {
         let mut r = rect(0, 0, 0, 0);
-        if GetWindowRect(h, &mut r) == 0 {
+        if IsIconic(h) != 0 {
+            // minimised from its taskbar button: the place it comes back to, not the
+            // off-screen icon position
+            let mut wp: WINDOWPLACEMENT = std::mem::zeroed();
+            wp.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+            if GetWindowPlacement(h, &mut wp) == 0 {
+                return None;
+            }
+            r = wp.rcNormalPosition;
+        } else if GetWindowRect(h, &mut r) == 0 {
             return None;
         }
         let k = 96.0 / GetDpiForWindow(h).max(96) as f64;
@@ -107,12 +116,12 @@ fn register() {
                 cbClsExtra: 0,
                 cbWndExtra: 0,
                 hInstance: GetModuleHandleW(std::ptr::null()),
-                hIcon: std::ptr::null_mut(),
+                hIcon: if name == ROWS { std::ptr::null_mut() } else { crate::shell::app_icon(GetSystemMetrics(SM_CXICON)) },
                 hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
                 hbrBackground: std::ptr::null_mut(),
                 lpszMenuName: std::ptr::null(),
                 lpszClassName: n.as_ptr(),
-                hIconSm: std::ptr::null_mut(),
+                hIconSm: if name == ROWS { std::ptr::null_mut() } else { crate::shell::app_icon(GetSystemMetrics(SM_CXSMICON)) },
             };
             RegisterClassExW(&wc);
         }
@@ -187,7 +196,7 @@ pub fn open(focus: bool) {
     let h = hwnd();
     if !h.is_null() {
         unsafe {
-            ShowWindow(h, SW_SHOWNA);
+            ShowWindow(h, if IsIconic(h) != 0 { SW_RESTORE } else { SW_SHOWNA });
             if focus {
                 SetForegroundWindow(h);
             }
@@ -217,11 +226,14 @@ pub fn open(focus: bool) {
         // test / measurement modes: created off-screen, so nothing ever flashes on the user's desktop
         let (x, y) = if crate::cfg().onscreen { (x, y) } else { (-15000, -15000) };
         let s = Box::new(State { search: std::ptr::null_mut(), rows: std::ptr::null_mut(), vbar: std::ptr::null_mut(), hot: None, down: None, ctx: None });
+        // a taskbar button of its own (user decision 2026-11-16 — v1.1 kept the list off the
+        // taskbar); WS_MINIMIZEBOX so its button minimises and restores it like a note's
+        let ex = if crate::cfg().taskbar { WS_EX_APPWINDOW } else { WS_EX_TOOLWINDOW };
         let h = CreateWindowExW(
-            WS_EX_TOOLWINDOW,
+            ex,
             wide(CLASS).as_ptr(),
-            wide("GaeunMemo").as_ptr(),
-            WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_CLIPCHILDREN,
+            wide("메모 목록").as_ptr(),
+            WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
             x,
             y,
             w,
@@ -488,8 +500,10 @@ unsafe extern "system" fn list_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             0
         }
         WM_SIZE => {
-            relayout(h);
-            InvalidateRect(h, std::ptr::null(), 0);
+            if wp as u32 != SIZE_MINIMIZED {
+                relayout(h);
+                InvalidateRect(h, std::ptr::null(), 0);
+            }
             0
         }
         WM_DPICHANGED => {

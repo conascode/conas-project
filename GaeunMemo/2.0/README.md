@@ -1,4 +1,4 @@
-# GaeunMemo 2.0 — P3 (storage: SQLite, pictures on disk)
+# GaeunMemo 2.0 — P4 (tray, autostart, single instance, taskbar)
 
 Native rewrite planned in `../gaeunmemo/docs/GaeunMemo2_Technical_Report.pdf` (GM2-TDR-001).
 No Tauri, no WebView2: Rust + Win32, one process.
@@ -9,14 +9,20 @@ No Tauri, no WebView2: Rust + Win32, one process.
   confirm UI rebuilt in Win32 and checked against v1.1 pixel by pixel.
 - **P2** (done): the body holds v1.1's formatted HTML — bold, italic, underline, strike,
   bullets, pictures — with v1.1's paste / drop / copy / lock rules.
-- **P3** (this build): notes, settings, window places and pictures are **saved** — SQLite
+- **P3** (done 2026-11-16): notes, settings, window places and pictures are **saved** — SQLite
   (WAL, synchronous=FULL) written by one background thread, pictures as files. Development
   builds use their own folder **`%APPDATA%\gaeunmemo2-dev\`** (user decision 2026-11-14) and
   never touch v1.1's `%APPDATA%\gaeunmemo\`; importing v1 data is P5.
+- **P4** (this build): the app lives in the **tray** (left click: notes to the front, right
+  click: 새 메모 / 메모 목록 / 컴퓨터 켤 때 자동 실행 / 종료); closing every window keeps it
+  running, 종료 is in the tray menu. Starting it again brings the running one to the front.
+  **Autostart** uses its own value `GaeunMemo2-dev` under HKCU Run (user decision
+  2026-11-16; v1.1's `gaeunmemo` value is left alone) and is turned on at the first start.
+  App icon on the taskbar, AUMID `GaeunMemo2.Dev`, v1.1-style log (256 KiB rotation).
 
 ## Try it
 
-Run `dist\p3\gaeunmemo2.exe` (or `target\release\gaeunmemo2.exe` after a build) with no
+Run `dist\p4\gaeunmemo2.exe` (or `target\release\gaeunmemo2.exe` after a build) with no
 arguments. The first start opens one empty note; what you write, colours, sizes, places,
 전체화면 and pictures are there again after closing and restarting. `--data DIR` uses
 another folder. Things to try:
@@ -31,6 +37,8 @@ another folder. Things to try:
 
 | Path | |
 | --- | --- |
+| `src/shell.rs`, `src/autostart.rs` | Tray icon and menu, the hidden session window (TaskbarCreated, session end, a second launch's request), HKCU Run value `GaeunMemo2-dev` (F-19 / F-35 rules in `autostart::plan`) |
+| `src/p4check.rs` | `--mode p4check`: second launch, session end, icon, autostart value (a test key, never the real Run key), log rotation |
 | `src/store.rs` | SQLite store: schema v1 (report §12), writer thread (merges waiting changes per note, one transaction), pictures written temp → flush → rename before the rows that refer to them, quick_check + backup restore at start, daily backup (7 kept), 24 h orphan picture clean-up |
 | `src/log.rs` | `gaeunmemo.log` in the data folder (store failures, restores) |
 | `src/rich.rs` | v1.1 `rich.js` in Rust: HTML tokenizer + tree builder, allow-list sanitizer, `innerHTML`, Chromium `innerText` (the `text` copy), on-screen document model, one-pass save |

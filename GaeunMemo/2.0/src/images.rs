@@ -76,6 +76,7 @@ pub fn add(bytes: Vec<u8>) -> Option<String> {
     let ext = sniff(&bytes)?;
     pixel_size(&bytes)?;
     let name = new_name(ext);
+    crate::log::write(&format!("picture added: {ext}, {} bytes", bytes.len()));
     let bytes = Arc::new(bytes);
     remember(&name, bytes.clone());
     // the file goes to images\ before the note row that refers to it (same writer FIFO)

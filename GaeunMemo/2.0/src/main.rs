@@ -15,6 +15,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod autostart;
 mod bench;
 mod body;
 mod confirm;
@@ -28,12 +29,14 @@ mod metrics;
 mod note;
 mod p2check;
 mod p3check;
+mod p4check;
 mod ptd;
 mod render;
 mod rich;
 mod richedit;
 mod rtfread;
 mod sbar;
+mod shell;
 mod selftest;
 mod store;
 mod theme;
@@ -134,7 +137,8 @@ fn parse() -> Config {
         images: get("--images").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default(),
         taskbar: interactive || has("--taskbar"),
         onscreen: interactive || has("--onscreen"),
-        quit_when_empty: interactive,
+        // P4: the app stays in the tray when every window is closed (v1.1); 종료 is in the tray menu
+        quit_when_empty: false,
         mode,
     }
 }
@@ -197,42 +201,86 @@ fn main() {
         "p2check" => p2check::run(&c.input, &c.out),
         "p3check" => p3check::run(&c.data, &c.out),
         "p3kill" => p3check::kill_child(&c.data, &c.label),
+        "p4check" => p4check::run(&c.data, &c.out),
+        "p4child" => p4check::child(&c.data),
         "gif" => ptd::gif(c.images.first().map(String::as_str).unwrap_or(""), &c.out, &c.label),
         "interactive" => {
-            // P3: notes are stored in the data folder (--data, else %APPDATA%\gaeunmemo2-dev)
-            let dir = if c.data.is_empty() { store::default_dir() } else { std::path::PathBuf::from(&c.data) };
-            if !win::single_instance(&dir) {
-                std::process::exit(0); // already running on this folder (P4 brings it to the front)
+            // P4: one app per data folder, resident in the tray (report §6.5, F-16 – F-20, F-35)
+            let autostarted = std::env::args().any(|a| a == autostart::ARG);
+            let focus = !autostarted; // started by Windows at logon: take no focus (F-19)
+            // taskbar: every note window is a button of this app (F-17); its own id while v1.1
+            // is still installed, so the two apps' windows are not grouped together
+            unsafe {
+                let _ = windows_sys::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(win::wide("GaeunMemo2.Dev").as_ptr());
             }
-            note::register_class();
+            let custom = !c.data.is_empty();
+            let dir = if custom { std::path::PathBuf::from(&c.data) } else { store::default_dir() };
+            if !win::single_instance(&dir) {
+                // already running on this folder: it shows its notes (F-18)
+                shell::signal_running(&dir);
+                std::process::exit(0);
+            }
             log::set_dir(&dir);
+            log::install_panic_hook();
+            log::write(&format!("start v{} autostart={autostarted}", env!("CARGO_PKG_VERSION")));
+            note::register_class();
             match store::open(&dir) {
                 Ok(loaded) => {
                     let notice = loaded.notice.clone();
                     let list_open = loaded.windows.get("list").is_some_and(|w| w.0);
+                    let first_run = loaded.settings.get("initialized").map(String::as_str) != Some("1");
+                    let saved_auto = loaded.settings.get("autostart").cloned();
                     list::set_saved(loaded.windows.get("list").and_then(|w| w.1));
                     app::load(loaded);
+                    let (total, open) = app::with(|a| (a.notes.len(), a.notes.iter().filter(|n| n.open).count()));
+                    log::write(&format!("load: {total} notes ({open} open){}", if first_run { ", first run" } else { "" }));
                     if let Some(m) = notice {
                         log::write(&m);
                         win::message_box(&m);
                     }
+                    // autostart (F-19 / F-35): the stored choice wins; a value removed behind
+                    // the app's back comes back, a moved development exe is followed
+                    let data = custom.then(|| dir.clone());
+                    let wanted = autostart::command(data.as_deref());
+                    let (choice, action) = autostart::plan(saved_auto.as_deref(), first_run, autostart::current().as_deref(), &wanted);
+                    if let Some(on) = choice {
+                        store::send(store::Cmd::Setting("autostart".into(), if on { "1" } else { "0" }.into()));
+                    }
+                    match action {
+                        autostart::Action::Register | autostart::Action::Update => {
+                            let ok = autostart::set_enabled(true, data.as_deref());
+                            log::write(&format!("autostart: {} ({})", if action == autostart::Action::Register { "registered" } else { "path updated" }, if ok { "ok" } else { "failed" }));
+                        }
+                        autostart::Action::None => {}
+                    }
+                    // first run (F-20): one empty note in the middle of the screen, once
+                    if first_run {
+                        if total == 0 {
+                            app::new_note(None);
+                        }
+                        store::send(store::Cmd::Setting("initialized".into(), "1".into()));
+                    }
                     let ids: Vec<u64> = app::with(|a| a.notes.iter().filter(|n| n.open).map(|n| n.id).collect());
                     for (k, id) in ids.iter().enumerate() {
-                        app::open_note(*id, None, k + 1 == ids.len());
+                        app::open_note(*id, None, focus && k + 1 == ids.len());
                     }
-                    if app::with(|a| a.notes.is_empty()) {
-                        app::new_note(None); // first start: one empty note
-                    } else if ids.is_empty() || list_open {
-                        list::open(ids.is_empty());
+                    // the list as it was, or — started by the user with nothing open — to
+                    // show something (at logon with nothing open: the tray only)
+                    if list_open || (focus && ids.is_empty() && !(first_run && total == 0)) {
+                        list::open(focus && ids.is_empty());
                     }
                 }
                 Err(e) => {
+                    log::write(&format!("EXIT: store open failed: {e}"));
                     win::message_box(&format!("메모를 불러올 수 없어요.
 {e}"));
                     std::process::exit(1);
                 }
             }
+            shell::create(&dir, custom.then(|| dir.clone()));
             message_loop();
+            shell::remove_tray();
+            log::write("EXIT: message loop ended");
             store::close();
         }
         // an unknown --mode (e.g. an older build than the caller expects) must never fall

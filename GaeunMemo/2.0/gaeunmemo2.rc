@@ -1,2 +1,4 @@
 #include <winuser.h>
 1 RT_MANIFEST "app.manifest"
+// the app icon (v1.1 icon.ico: 16-256 px): taskbar, tray, Alt+Tab
+1 ICON "icons/gaeunmemo.ico"
