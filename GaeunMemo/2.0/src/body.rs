@@ -82,6 +82,39 @@ const PROP_KIND: &str = "gm_kind";
 const PROP_WHEEL: &str = "gm_wheel";
 /// the v1.1 scroll bar window (crate::sbar) that sits over the body's right edge
 const PROP_BAR: &str = "gm_bar";
+/// width of the body that shows (the RichEdit window itself is wider, see `place`)
+const PROP_VISW: &str = "gm_visw";
+/// right edge of the window region last set (to skip setting the same one again)
+const PROP_CLIP: &str = "gm_clip";
+
+/// Clips the body so that nothing of its system scroll bar shows: while the bar is there the
+/// region ends where it starts (the v1.1 bar window covers the rest of the edge); without it
+/// the region is the visible width.
+fn clip(h: HWND) {
+    unsafe {
+        let w = prop(h, PROP_VISW) as i32;
+        if w <= 0 {
+            return;
+        }
+        let mut cr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut wr = cr;
+        GetClientRect(h, &mut cr);
+        GetWindowRect(h, &mut wr);
+        let right = if native_bar_shown(h) { cr.right.min(w) } else { w }.max(1);
+        let hh = (wr.bottom - wr.top).max(1);
+        let key = (right as isize) << 20 | hh as isize;
+        if prop(h, PROP_CLIP) != key {
+            set_prop(h, PROP_CLIP, key);
+            SetWindowRgn(h, CreateRectRgn(0, 0, right, hh), 1);
+        }
+    }
+}
+
+/// True while the v1.1 scroll bar shows over the body's right edge.
+pub fn bar_visible(h: HWND) -> bool {
+    let b = bar_of(h);
+    !h.is_null() && !b.is_null() && unsafe { IsWindowVisible(b) } != 0
+}
 
 pub fn bar_for_test(h: HWND) -> HWND {
     bar_of(h)
@@ -112,7 +145,8 @@ pub fn place(h: HWND, x: i32, y: i32, w: i32, hh: i32) {
         let sb = px(crate::sbar::WIDTH, dpi);
         let ww = (w - sb + native_bar_w(h)).max(1);
         SetWindowPos(h, std::ptr::null_mut(), x, y, ww, hh, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowRgn(h, CreateRectRgn(0, 0, w.max(1), hh.max(1)), 1);
+        set_prop(h, PROP_VISW, w as isize);
+        clip(h);
         let bar = bar_of(h);
         if !bar.is_null() {
             // v1.1's bar runs to the window's right edge with its last pixel under the 1 px
@@ -210,18 +244,30 @@ fn placeholder(h: HWND, dc: HDC, locked: bool) {
 /// it and then drawing the picture, which flashed on every resize step. RichEdit's
 /// off-screen drawing (WM_PRINTCLIENT) lays out every visible line, so it is kept to the
 /// repaints that redraw most of the body anyway.
+/// How the body was painted (tests: a resize step must be one off-screen frame, no erase).
+pub static ERASES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static NATIVE_PAINTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static BUFFERED_PAINTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub static FROZEN_SKIPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 fn paint(h: HWND, locked: bool) {
+    if crate::richedit::is_frozen() {
+        FROZEN_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        return; // left invalid: painted when the freeze ends (no bare-paper frame)
+    }
     unsafe {
         let mut ur = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         GetUpdateRect(h, &mut ur, 0);
         let dpi = GetDpiForWindow(h).max(96) as i32;
         let line = (prop(h, PROP_FONT).max(10) as i32 * 16 * dpi) / (10 * 96);
         if ur.bottom - ur.top <= 3 * line {
+            NATIVE_PAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             DefSubclassProc(h, WM_PAINT, 0, 0);
             let dc = GetDC(h);
             placeholder(h, dc, locked);
             ReleaseDC(h, dc);
         } else {
+            BUFFERED_PAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             paint_buffered(h, locked);
         }
         sync_bar(h);
@@ -529,6 +575,8 @@ pub fn set_padding(h: HWND) {
         let hidden = if native_bar_shown(h) { 0 } else { (native_bar_w(h) - px(crate::sbar::WIDTH, dpi)).max(0) };
         let r = RECT { left: px(12.0, dpi) - px(1.0, dpi).max(1), top: px(4.0, dpi), right: rc.right - px(12.0, dpi) - hidden, bottom: rc.bottom - px(12.0, dpi) };
         SendMessageW(h, windows_sys::Win32::UI::Controls::EM_SETRECT, 0, &r as *const _ as isize);
+        // the system bar may have come or gone: keep it out of sight
+        clip(h);
     }
 }
 
@@ -676,6 +724,11 @@ unsafe extern "system" fn body_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _
             SendMessageW(parent, WM_APP_FONT, if delta > 0 { 1usize } else { (-1isize) as usize }, 0);
             return 0; // RichEdit's own zoom stays off
         }
+        // the note's resize bands run over the body: let the note have the mouse there
+        WM_NCHITTEST if crate::win::on_parent_edge(h, lp) => return HTTRANSPARENT as LRESULT,
+        WM_ERASEBKGND if is_rich(h) => {
+            ERASES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         WM_MOUSEWHEEL if is_rich(h) => {
             wheel(h, ((wp >> 16) & 0xFFFF) as u16 as i16 as i32);
             return 0;
@@ -716,7 +769,7 @@ unsafe extern "system" fn body_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _
         }
         WM_NCDESTROY => {
             RemoveWindowSubclass(h, Some(body_proc), 7);
-            for k in [PROP_LOCKED, PROP_FONT, PROP_KIND, PROP_WHEEL, PROP_BAR] {
+            for k in [PROP_LOCKED, PROP_FONT, PROP_KIND, PROP_WHEEL, PROP_BAR, PROP_VISW, PROP_CLIP] {
                 RemovePropW(h, wide(k).as_ptr());
             }
         }

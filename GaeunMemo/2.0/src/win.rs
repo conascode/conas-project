@@ -110,3 +110,68 @@ pub fn message_box(text: &str) {
     let c = wide("GaeunMemo");
     unsafe { MessageBoxW(std::ptr::null_mut(), t.as_ptr(), c.as_ptr(), MB_OK | MB_ICONINFORMATION) };
 }
+
+// ------------------------------------------------------------------ resize edges
+
+/// The resize bands of a note or the list window (client coordinates; the top edge is the
+/// caller's): `edge` px along the left and bottom, `edge_right` along the right (narrower
+/// while a scroll bar sits there), corners `corner` px long so a diagonal is easy to catch.
+pub fn edge_hit(x: i32, y: i32, w: i32, h: i32, edge: i32, edge_right: i32, corner: i32) -> Option<u32> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT};
+    let left = x < edge;
+    let right = x >= w - edge_right;
+    let bottom = y >= h - edge;
+    let low = y >= h - corner;
+    if (bottom && x < corner) || (left && low) {
+        Some(HTBOTTOMLEFT)
+    } else if (bottom && x >= w - corner) || (right && low) {
+        Some(HTBOTTOMRIGHT)
+    } else if bottom {
+        Some(HTBOTTOM)
+    } else if left {
+        Some(HTLEFT)
+    } else if right {
+        Some(HTRIGHT)
+    } else {
+        None
+    }
+}
+
+/// For a child window lying over its parent's edges (the note body, the scroll bar, the list
+/// rows): true where the parent resizes, so the child answers HTTRANSPARENT and the parent
+/// gets the mouse. Without this only the 1–2 px the child leaves free could be grabbed.
+pub fn on_parent_edge(child: HWND, lp: LPARAM) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetParent, SendMessageW, WM_NCHITTEST};
+    let parent = unsafe { GetParent(child) };
+    if parent.is_null() {
+        return false;
+    }
+    let r = unsafe { SendMessageW(parent, WM_NCHITTEST, 0, lp) };
+    (10..=17).contains(&r) // HTLEFT … HTBOTTOMRIGHT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_hit;
+    use windows_sys::Win32::UI::WindowsAndMessaging::*;
+
+    #[test]
+    fn edges_and_corners() {
+        // 300 × 200, edge 9, right edge 4 (scroll bar), corner 18
+        let h = |x, y| edge_hit(x, y, 300, 200, 9, 4, 18);
+        assert_eq!(h(0, 100), Some(HTLEFT));
+        assert_eq!(h(8, 100), Some(HTLEFT));
+        assert_eq!(h(9, 100), None);
+        assert_eq!(h(299, 100), Some(HTRIGHT));
+        assert_eq!(h(296, 100), Some(HTRIGHT));
+        assert_eq!(h(295, 100), None); // the scroll bar keeps the rest
+        assert_eq!(h(150, 199), Some(HTBOTTOM));
+        assert_eq!(h(150, 191), Some(HTBOTTOM));
+        assert_eq!(h(150, 190), None);
+        assert_eq!(h(10, 195), Some(HTBOTTOMLEFT)); // corner along the bottom
+        assert_eq!(h(2, 185), Some(HTBOTTOMLEFT)); // corner up the left side
+        assert_eq!(h(285, 195), Some(HTBOTTOMRIGHT));
+        assert_eq!(h(298, 185), Some(HTBOTTOMRIGHT));
+        assert_eq!(h(150, 100), None);
+    }
+}

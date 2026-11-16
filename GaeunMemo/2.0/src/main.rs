@@ -191,6 +191,7 @@ fn main() {
         "selftest" => selftest::run(&c.out),
         "shots" => visual::shots(&c.cases, &c.outdir, &c.label),
         "notesnap" => visual::notesnap(&c.data, &c.outdir),
+        "flashprobe" => visual::flashprobe(&c.data, &c.outdir),
         "diff" => visual::diff(&c.refdir, &c.outdir),
         "rich" => rich::check_file(&c.input, &c.out),
         "p2check" => p2check::run(&c.input, &c.out),

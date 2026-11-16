@@ -407,6 +407,19 @@ pub fn run(input: &str, out: &str) {
         br.right == nr.right - 1
     };
     t.check("scroll bar: shown when it scrolls, 8 CSS px to the window edge", unsafe { IsWindowVisible(bar) } != 0 && bw == (8.0 * dpi / 96.0).round() as i32 - 1 && edge_ok, format!("{bw}×{bh} px, ends at the border: {edge_ok}"));
+    // nothing of the system scroll bar may show: it must lie wholly outside the body's
+    // window region (user report 2026-11-16: a 2 px sliver of it showed)
+    let (sys_left, rgn_right) = unsafe {
+        let mut sbi: SCROLLBARINFO = std::mem::zeroed();
+        sbi.cbSize = std::mem::size_of::<SCROLLBARINFO>() as u32;
+        GetScrollBarInfo(h, OBJID_VSCROLL, &mut sbi);
+        let mut wr = std::mem::zeroed::<windows_sys::Win32::Foundation::RECT>();
+        GetWindowRect(h, &mut wr);
+        let mut rb = std::mem::zeroed::<windows_sys::Win32::Foundation::RECT>();
+        windows_sys::Win32::Graphics::Gdi::GetWindowRgnBox(h, &mut rb);
+        (sbi.rcScrollBar.left - wr.left, rb.right)
+    };
+    t.check("scroll bar: the system bar is wholly clipped away", sys_left >= rgn_right, format!("system bar from {sys_left} px, body region to {rgn_right} px"));
     t.check("scroll bar: takes 8 CSS px from the text width (v1.1)", (short_w - long_w - 8.0).abs() < 0.6, format!("{short_w:.1} → {long_w:.1} CSS px"));
     let lp = |x: i32, y: i32| (((y as u32) << 16) | (x as u32 & 0xFFFF)) as isize;
     let max_y = {
@@ -429,6 +442,55 @@ pub fn run(input: &str, out: &str) {
         SendMessageW(bar, WM_LBUTTONUP, 0, lp(bw / 2, -50));
     }
     t.check("scroll bar: dragging back to the top", scroll_y() == 0, format!("{} px", scroll_y()));
+    // resize bands over the body and the scroll bar (user report 2026-11-16: only 1–2 px at
+    // the left / bottom / right could be grabbed): the children step aside, the note resizes
+    {
+        let mut nr = unsafe { std::mem::zeroed::<windows_sys::Win32::Foundation::RECT>() };
+        unsafe { GetWindowRect(hw, &mut nr) };
+        let sp = |x: i32, y: i32| ((y as u32 as isize) << 16) | (x as u32 & 0xFFFF) as isize;
+        let ask = |w: HWND, x: i32, y: i32| unsafe { SendMessageW(w, WM_NCHITTEST, 0, sp(x, y)) };
+        let d = |v: f32| (v * dpi as f32 / 96.0).round() as i32;
+        let midy = (nr.top + nr.bottom) / 2;
+        let midx = (nr.left + nr.right) / 2;
+        let cases: [(&str, HWND, i32, i32, isize, isize); 7] = [
+            ("left band over the body", h, nr.left + d(4.0), midy, -1, HTLEFT as isize),
+            ("bottom band over the body", h, midx, nr.bottom - 1 - d(4.0), -1, HTBOTTOM as isize),
+            ("right edge over the scroll bar", bar, nr.right - 2, midy, -1, HTRIGHT as isize),
+            ("bottom-right corner", bar, nr.right - 2, nr.bottom - 1 - d(10.0), -1, HTBOTTOMRIGHT as isize),
+            ("bottom-left corner up the side", h, nr.left + d(2.0), nr.bottom - 1 - d(10.0), -1, HTBOTTOMLEFT as isize),
+            ("scroll bar inside the 3 px", bar, nr.right - 1 - d(6.0), midy, HTCLIENT as isize, HTCLIENT as isize),
+            ("text area inside the band", h, nr.left + d(8.0), midy, HTCLIENT as isize, HTCLIENT as isize),
+        ];
+        let mut bad = Vec::new();
+        for (name, child, x, y, want_child, want_note) in cases {
+            let (c, n) = (ask(child, x, y), ask(hw, x, y));
+            if c != want_child || n != want_note {
+                bad.push(format!("{name}: child {c} note {n}"));
+            }
+        }
+        t.check("resize bands: 6 CSS px over the body, 3 along the scroll bar, 12 px corners", bad.is_empty(), bad.join("; "));
+    }
+    // dragging the thumb: every mouse move shows its frame at once (user report 2026-11-16:
+    // the text moved in jumps), within one 60 Hz frame
+    let mut step_ms = Vec::new();
+    let mut left_over = 0;
+    pump();
+    unsafe {
+        SendMessageW(bar, WM_LBUTTONDOWN, 1, lp(bw / 2, 3));
+        for k in 1..=40 {
+            let t0 = Instant::now();
+            SendMessageW(bar, WM_MOUSEMOVE, 1, lp(bw / 2, 3 + k * 6));
+            step_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+            let mut r = std::mem::zeroed::<windows_sys::Win32::Foundation::RECT>();
+            left_over += (windows_sys::Win32::Graphics::Gdi::GetUpdateRect(h, &mut r, 0) != 0) as i32;
+            left_over += (windows_sys::Win32::Graphics::Gdi::GetUpdateRect(bar, &mut r, 0) != 0) as i32;
+        }
+        SendMessageW(bar, WM_LBUTTONUP, 0, lp(bw / 2, 3 + 40 * 6));
+    }
+    step_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    t.check("scroll bar: each drag step is painted at once", left_over == 0 && scroll_y() > 0, format!("{left_over} moves left something unpainted, scrolled to {} px", scroll_y()));
+    t.check("scroll bar: a drag step takes ≤ 16 ms (with painting)", step_ms[20] <= 16.0, format!("p50 {:.2} ms, max {:.2} ms", step_ms[20], step_ms[39]));
+    set_y(0);
     let page = {
         let mut si: SCROLLINFO = unsafe { std::mem::zeroed() };
         si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
@@ -477,6 +539,46 @@ pub fn run(input: &str, out: &str) {
     let settled = richedit::picture_widths(h);
     t.check("resize: sharp copies replace the quick ones once the size settles", near(&settled, [expect(900.0), expect(300.0)]) && !images::needs_sharp(hw, &big, note_text_w) && !images::needs_sharp(hw, &small, note_text_w), format!("{settled:?} px"));
     t.check("resize: still the same note after settling", stored(h) == before, String::new());
+    // a pause in the middle of a drag must not swap in the sharp copies (they went soft →
+    // sharp → soft while dragging slowly, which flashed); the drag's end does
+    unsafe {
+        SendMessageW(hw, WM_ENTERSIZEMOVE, 0, 0);
+        SetWindowPos(hw, std::ptr::null_mut(), 0, 0, 640, 700, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    for _ in 0..24 {
+        pump();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let wpause = richedit::text_css_width(h);
+    let soft_during = images::needs_sharp(hw, &big, wpause);
+    unsafe { SendMessageW(hw, WM_EXITSIZEMOVE, 0, 0) };
+    for _ in 0..60 {
+        pump();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let sharp_after = !images::needs_sharp(hw, &big, richedit::text_css_width(h));
+    t.check("resize: no sharp swap during a 600 ms pause in a drag, sharp after it ends", soft_during && sharp_after, format!("soft while dragging: {soft_during}, sharp after: {sharp_after}"));
+    // what one resize step paints (user report 2026-11-16: pictures flash while resizing):
+    // the body must show one finished frame per step — no erase, no partial native paint
+    {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (mut er, mut na, mut bu) = (0, 0, 0);
+        for k in 0..10 {
+            let w = if k % 2 == 0 { 620 } else { 680 };
+            body::ERASES.store(0, Relaxed);
+            body::NATIVE_PAINTS.store(0, Relaxed);
+            body::BUFFERED_PAINTS.store(0, Relaxed);
+            unsafe {
+                SetWindowPos(hw, std::ptr::null_mut(), 0, 0, w, 700, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                windows_sys::Win32::Graphics::Gdi::UpdateWindow(hw);
+                windows_sys::Win32::Graphics::Gdi::UpdateWindow(h);
+            }
+            er += body::ERASES.load(Relaxed);
+            na += body::NATIVE_PAINTS.load(Relaxed);
+            bu += body::BUFFERED_PAINTS.load(Relaxed);
+        }
+        t.check("resize: each step is one off-screen frame, nothing erased first", er == 0 && na == 0 && bu >= 10 && bu <= 10, format!("10 steps: {er} erases, {na} partial paints, {bu} frames"));
+    }
     // one resize step with pictures: WM_SIZE (pictures follow) + the full repaint
     let mut step_ms = Vec::new();
     for k in 0..20 {

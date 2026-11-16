@@ -429,14 +429,13 @@ fn hit(h: HWND, sx: i32, sy: i32) -> u32 {
             HTCAPTION
         };
     }
-    let (bottom, left, right) = (p.y >= hh - b, p.x < b, p.x >= w - b);
-    match (bottom, left, right) {
-        (true, true, _) => return HTBOTTOMLEFT,
-        (true, _, true) => return HTBOTTOMRIGHT,
-        (true, _, _) => return HTBOTTOM,
-        (_, true, _) => return HTLEFT,
-        (_, _, true) => return HTRIGHT,
-        _ => {}
+    // as in a note: 6 CSS px bands (also over the rows, which answer HTTRANSPARENT there),
+    // 12 px corners, only the outer 3 px along a scroll bar
+    let edge = px(6.0, dpi);
+    let bar = unsafe { st(h).map_or(false, |s| !s.vbar.is_null() && IsWindowVisible(s.vbar) != 0) };
+    let edge_right = if bar { px(3.0, dpi) } else { edge };
+    if let Some(code) = crate::win::edge_hit(p.x, p.y, w, hh, edge, edge_right, px(12.0, dpi)) {
+        return code;
     }
     let l = lay(h);
     if p.y < l.bar.bottom {
@@ -843,6 +842,7 @@ unsafe extern "system" fn rows_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
     let list = GetParent(h);
     match msg {
         WM_ERASEBKGND => 1,
+        WM_NCHITTEST if crate::win::on_parent_edge(h, lp) => HTTRANSPARENT as LRESULT,
         WM_PAINT => {
             paint_rows(h);
             0

@@ -62,6 +62,17 @@ target\auto\release\gaeunmemo2.exe --mode diff --refdir bench\results\visual\ref
 
 `CASES` is the case file `diff.py` writes (HTML snippets separated by U+001E).
 
+`kill.py` also kills the child inside a commit (`commit`: a test-only hold between the
+statements and COMMIT, enabled by `GM_TEST_COMMIT_HOLD_MS` plus a `hold` file in the test
+folder) and right after a log-off (`endsession`); `python -I bench\p3\kill.py 10 commit`
+runs one of them alone. `p3check` covers a full database (SQLite page limit) and a picture
+file that cannot be written.
+
+`--mode flashprobe --data COPY --outdir DIR` measures white flashes while a note with
+pictures is resized: the note is cloaked with DWM (never visible, never focused; it stops if
+the cloak cannot be set) before it is moved onto the screen, and each step's pixels right
+after `WM_SIZE` are compared with the finished frame.
+
 To see how stored notes render (e.g. a picture a user reports), copy a data folder and run
 `target\auto\release\gaeunmemo2.exe --mode notesnap --data COPY --outdir DIR` — it opens the
 copy's open notes off-screen at their saved sizes and saves one PNG per note. Never point

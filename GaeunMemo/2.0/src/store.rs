@@ -55,6 +55,9 @@ pub enum Cmd {
     Image { name: String, bytes: Arc<Vec<u8>> },
     Flush(Sender<()>),
     Stop,
+    /// tests only (`--mode p3check`): one SQL statement run by the writer, e.g. a page limit
+    /// that makes the database "full"
+    TestSql(String),
 }
 
 pub struct Loaded {
@@ -299,6 +302,8 @@ pub fn open(dir: &Path) -> Result<Loaded, String> {
 
 #[derive(Default)]
 struct Pending {
+    /// pictures not written yet (a failed write is retried with the rows, never dropped)
+    images: Vec<(String, Arc<Vec<u8>>)>,
     upserts: HashMap<String, Row>,
     order: Vec<String>,
     deletes: HashSet<String>,
@@ -308,9 +313,9 @@ struct Pending {
 
 impl Pending {
     fn is_empty(&self) -> bool {
-        self.upserts.is_empty() && self.deletes.is_empty() && self.settings.is_empty() && self.windows.is_empty()
+        self.images.is_empty() && self.upserts.is_empty() && self.deletes.is_empty() && self.settings.is_empty() && self.windows.is_empty()
     }
-    fn take(&mut self, c: Cmd, flushes: &mut Vec<Sender<()>>, dir: &Path) -> bool {
+    fn take(&mut self, c: Cmd, flushes: &mut Vec<Sender<()>>, tests: &mut Vec<String>) -> bool {
         match c {
             Cmd::Upsert(r) => {
                 self.deletes.remove(&r.id);
@@ -331,14 +336,12 @@ impl Pending {
                 self.windows.insert(name, (open, rect));
             }
             Cmd::Image { name, bytes } => {
-                // before any later note row that refers to it (same channel order)
-                if let Err(e) = write_image(&dir.join("images"), &name, &bytes) {
-                    FAILURES.fetch_add(1, Ordering::Relaxed);
-                    crate::log::write(&format!("사진 저장 실패 {name}: {e}"));
-                }
+                // written in `commit`, before the rows that refer to it
+                self.images.push((name, bytes));
             }
             Cmd::Flush(s) => flushes.push(s),
             Cmd::Stop => return false,
+            Cmd::TestSql(q) => tests.push(q),
         }
         true
     }
@@ -363,7 +366,48 @@ pub fn write_image(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> 
     std::fs::rename(&tmp, &target)
 }
 
-fn commit(conn: &mut Connection, p: &Pending) -> rusqlite::Result<()> {
+/// Why a commit did not happen (it is retried; nothing is dropped).
+#[derive(Debug)]
+enum CommitError {
+    Image(String, std::io::Error),
+    Sql(rusqlite::Error),
+}
+
+impl std::fmt::Display for CommitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CommitError::Image(n, e) => write!(f, "사진 {n}: {e}"),
+            CommitError::Sql(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<rusqlite::Error> for CommitError {
+    fn from(e: rusqlite::Error) -> Self {
+        CommitError::Sql(e)
+    }
+}
+
+/// Test hook (`bench/p3/kill.py commit`): with GM_TEST_COMMIT_HOLD_MS set and a file `hold`
+/// in the data folder, the writer stops inside the transaction — after its statements, before
+/// COMMIT — writes `in_commit` and waits, so the test can kill it there. Off otherwise.
+fn test_hold(dir: &Path) {
+    static HOLD: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let Some(ms) = *HOLD.get_or_init(|| std::env::var("GM_TEST_COMMIT_HOLD_MS").ok().and_then(|v| v.parse().ok())) else { return };
+    if dir.join("hold").exists() {
+        let _ = std::fs::write(dir.join("in_commit"), b"1");
+        std::thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+fn commit(conn: &mut Connection, p: &mut Pending, dir: &Path) -> Result<(), CommitError> {
+    // pictures first: a row may only be committed once the files it refers to are on disk
+    let images_dir = dir.join("images");
+    let _ = std::fs::create_dir_all(&images_dir);
+    while let Some((name, bytes)) = p.images.first().cloned() {
+        write_image(&images_dir, &name, &bytes).map_err(|e| CommitError::Image(name.clone(), e))?;
+        p.images.remove(0);
+    }
     let tx = conn.transaction()?;
     {
         let mut up = tx.prepare_cached(
@@ -428,7 +472,9 @@ fn commit(conn: &mut Connection, p: &Pending) -> rusqlite::Result<()> {
             win.execute(params![name, *open as i64, x, y, w, h])?;
         }
     }
-    tx.commit()
+    test_hold(dir);
+    tx.commit()?;
+    Ok(())
 }
 
 /// v1 `image_refs`: valid picture names in `data-gm="…"`, in order, no duplicates.
@@ -488,6 +534,7 @@ fn writer(mut conn: Connection, dir: PathBuf, rx: Receiver<Cmd>) {
     remove_orphans(&conn, &dir);
     let mut pending = Pending::default();
     let mut flushes: Vec<Sender<()>> = Vec::new();
+    let mut tests: Vec<String> = Vec::new();
     let mut backoff = Duration::from_secs(1);
     let mut retry_at: Option<Instant> = None;
     let mut running = true;
@@ -511,16 +558,21 @@ fn writer(mut conn: Connection, dir: PathBuf, rx: Receiver<Cmd>) {
             },
         };
         if let Some(c) = first {
-            running &= pending.take(c, &mut flushes, &dir);
+            running &= pending.take(c, &mut flushes, &mut tests);
         }
         while let Ok(c) = rx.try_recv() {
-            running &= pending.take(c, &mut flushes, &dir);
+            running &= pending.take(c, &mut flushes, &mut tests);
+        }
+        for q in tests.drain(..) {
+            if let Err(e) = conn.execute_batch(&q) {
+                crate::log::write(&format!("test SQL failed: {e}"));
+            }
         }
         if retry_at.is_some_and(|t| Instant::now() < t) && running && flushes.is_empty() {
             continue;
         }
         if !pending.is_empty() {
-            match commit(&mut conn, &pending) {
+            match commit(&mut conn, &mut pending, &dir) {
                 Ok(()) => {
                     pending = Pending::default();
                     retry_at = None;
@@ -544,7 +596,9 @@ fn writer(mut conn: Connection, dir: PathBuf, rx: Receiver<Cmd>) {
         }
     }
     if !pending.is_empty() {
-        let _ = commit(&mut conn, &pending);
+        if let Err(e) = commit(&mut conn, &mut pending, &dir) {
+            crate::log::write(&format!("끝낼 때 저장 실패: {e}"));
+        }
     }
     for f in flushes.drain(..) {
         let _ = f.send(());

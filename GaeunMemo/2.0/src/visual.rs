@@ -444,6 +444,64 @@ pub fn notesnap(data: &str, outdir: &str) {
             ys.push(format!("[{now},{}]", pos()));
         }
         log.push(Json::default().n("note", *id as f64).n("w", w as f64).n("h", hh as f64).b("saved", ok.is_ok()).raw("wheel_y", format!("[{}]", ys.join(","))).finish());
+        // scrolling cost: the wheel handler itself, a full off-screen repaint, and a repaint
+        // of the 150 px strip a notch uncovers (clipped)
+        unsafe {
+            let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetClientRect(body, &mut rc);
+            let screen = GetDC(std::ptr::null_mut());
+            let mem = CreateCompatibleDC(screen);
+            let bmp = CreateCompatibleBitmap(screen, rc.right.max(1), rc.bottom.max(1));
+            let old = SelectObject(mem, bmp);
+            let med = |mut v: Vec<f64>| {
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                v[v.len() / 2]
+            };
+            let (mut full, mut strip, mut handler) = (Vec::new(), Vec::new(), Vec::new());
+            let p0 = POINT { x: 0, y: 0 };
+            SendMessageW(body, 0x04DE, 0, &p0 as *const _ as isize);
+            for k in 0..12 {
+                let t0 = std::time::Instant::now();
+                SendMessageW(body, WM_MOUSEWHEEL, ((if k < 6 { -120i32 } else { 120 } as u32 as usize) & 0xFFFF) << 16, 0);
+                handler.push(t0.elapsed().as_secs_f64() * 1000.0);
+                ValidateRect(body, std::ptr::null());
+                let t1 = std::time::Instant::now();
+                crate::body::paint_to(body, mem, false);
+                GdiFlush();
+                full.push(t1.elapsed().as_secs_f64() * 1000.0);
+                let sdc = SaveDC(mem);
+                IntersectClipRect(mem, 0, rc.bottom - px(100.0, GetDpiForWindow(body)), rc.right, rc.bottom);
+                let t2 = std::time::Instant::now();
+                crate::body::paint_to(body, mem, false);
+                GdiFlush();
+                strip.push(t2.elapsed().as_secs_f64() * 1000.0);
+                RestoreDC(mem, sdc);
+            }
+            SelectObject(mem, old);
+            DeleteObject(bmp);
+            DeleteDC(mem);
+            ReleaseDC(std::ptr::null_mut(), screen);
+            log.push(Json::default().n("note", *id as f64).n("wheel_handler_ms", med(handler)).n("full_paint_ms", med(full)).n("strip_paint_ms", med(strip)).finish());
+            // resize steps as a mouse drag makes them (4 px apart): WM_SIZE (pictures follow)
+            // and the paint, timed apart
+            let mut wr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetWindowRect(h, &mut wr);
+            let (w0, h0) = (wr.right - wr.left, wr.bottom - wr.top);
+            let (mut size_ms, mut paint_ms) = (Vec::new(), Vec::new());
+            for k in 0..30 {
+                let w = w0 - 4 * (k % 15) - 4;
+                let t0 = std::time::Instant::now();
+                SetWindowPos(h, std::ptr::null_mut(), 0, 0, w, h0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                let t1 = std::time::Instant::now();
+                UpdateWindow(h);
+                UpdateWindow(body);
+                size_ms.push((t1 - t0).as_secs_f64() * 1000.0);
+                paint_ms.push(t1.elapsed().as_secs_f64() * 1000.0);
+            }
+            let max = |v: &Vec<f64>| v.iter().cloned().fold(0.0, f64::max);
+            log.push(Json::default().n("note", *id as f64).n("resize_size_ms_p50", med(size_ms.clone())).n("resize_size_ms_max", max(&size_ms)).n("resize_paint_ms_p50", med(paint_ms.clone())).n("resize_paint_ms_max", max(&paint_ms)).finish());
+            SetWindowPos(h, std::ptr::null_mut(), 0, 0, w0, h0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
         // the v1.1 scroll bar window on its own
         unsafe {
             let bar = crate::body::bar_for_test(body);
@@ -481,4 +539,127 @@ pub fn notesnap(data: &str, outdir: &str) {
     }
     crate::store::close();
     metrics::append(&format!("{outdir}/notesnap.jsonl"), &log[1..].join("\n"));
+}
+
+/// Reads what a top-level window holds right now (its DWM surface, children included)
+/// through its window DC — only meaningful for a window that is on a screen.
+fn grab(h: HWND) -> (i32, i32, Vec<u32>) {
+    unsafe {
+        let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(h, &mut rc);
+        let (w, hh) = (rc.right.max(1), rc.bottom.max(1));
+        let wdc = GetDC(h);
+        let mem = CreateCompatibleDC(wdc);
+        let mut bi: BITMAPINFO = std::mem::zeroed();
+        bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -hh;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        let old = SelectObject(mem, dib);
+        BitBlt(mem, 0, 0, w, hh, wdc, 0, 0, SRCCOPY);
+        GdiFlush();
+        let px_ = std::slice::from_raw_parts(bits as *const u32, (w * hh) as usize).to_vec();
+        SelectObject(mem, old);
+        DeleteObject(dib);
+        DeleteDC(mem);
+        ReleaseDC(h, wdc);
+        (w, hh, px_)
+    }
+}
+
+/// `--mode flashprobe --data COPY --outdir DIR`: white flashes while a note with pictures is
+/// resized. The note is opened from COPY (a copied data folder), cloaked with DWM — the user
+/// never sees it, it never takes focus — and only then moved onto the screen, where its
+/// pixels can be read. For each resize step it compares what the window holds right after
+/// WM_SIZE (what DWM may show next) with the finished frame: paper-coloured pixels that the
+/// finished frame fills are a white flash. If the cloak cannot be set it stops.
+pub fn flashprobe(data: &str, outdir: &str) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DwmSetWindowAttribute};
+    note::register_class();
+    let f = wic();
+    let _ = std::fs::create_dir_all(outdir);
+    let Ok(loaded) = crate::store::open(std::path::Path::new(data)) else { std::process::exit(3) };
+    app::load(loaded);
+    let id = app::with(|a| a.notes.iter().find(|n| n.html.contains("data-gm=")).or(a.notes.first()).map(|n| n.id));
+    let Some(id) = id else { std::process::exit(4) };
+    app::with(|a| a.notes.iter_mut().filter(|n| n.id == id).for_each(|n| {
+        n.folded = false;
+        n.pinned = false;
+        n.maximized = false;
+    }));
+    app::open_note(id, Some((-15000, -15000)), false);
+    let h = app::window_of(id).unwrap();
+    let on: i32 = 1;
+    let mut cloaked: u32 = 0;
+    unsafe {
+        DwmSetWindowAttribute(h, 13 /* DWMWA_CLOAK */, &on as *const i32 as *const _, 4);
+        DwmGetWindowAttribute(h, 14 /* DWMWA_CLOAKED */, &mut cloaked as *mut u32 as *mut _, 4);
+    }
+    let mut log = Vec::new();
+    if cloaked == 0 {
+        metrics::append(&format!("{outdir}/flashprobe.jsonl"), &Json::default().s("error", "cloak not set: stopped before the screen").finish());
+        return;
+    }
+    let dpi = unsafe { GetDpiForWindow(h) };
+    let (w0, h0) = (px(360.0, dpi), px(420.0, dpi));
+    unsafe { SetWindowPos(h, HWND_BOTTOM, 120, 120, w0, h0, SWP_NOACTIVATE) };
+    pump_for(2500); // pictures decoded
+    let body = unsafe { note::state_of(h).unwrap().body };
+    let mut br = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetWindowRect(body, &mut br) };
+    let mut nr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    unsafe { GetWindowRect(h, &mut nr) };
+    let paper = crate::theme::pal(app::theme()).paper; // COLORREF 0x00BBGGRR
+    let paper_bgrx = ((paper & 0xFF) << 16) | (paper & 0xFF00) | ((paper >> 16) & 0xFF);
+    let (_, _, base) = grab(h);
+    let base_white = base.iter().filter(|&&p| p & 0xFFFFFF == paper_bgrx).count();
+    unsafe { SendMessageW(h, WM_ENTERSIZEMOVE, 0, 0) };
+    let mut worst = (0usize, 0usize);
+    let mut total_holes = 0usize;
+    let mut total_differ = 0usize;
+    let mut steps = 0;
+    for k in 0..24 {
+        // grow in 24 px steps, then shrink back (a drag of the right edge)
+        let w = if k < 12 { w0 + 24 * (k + 1) } else { w0 + 24 * (24 - k) };
+        unsafe { SetWindowPos(h, std::ptr::null_mut(), 0, 0, w, h0, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE) };
+        let (iw, ih, now) = grab(h);
+        pump_for(30);
+        unsafe { RedrawWindow(h, std::ptr::null(), std::ptr::null_mut(), RDW_UPDATENOW | RDW_ALLCHILDREN) };
+        let (_, _, done) = grab(h);
+        // holes: inside the body, paper now but not in the finished frame
+        let (bx0, by0) = (br.left - nr.left, br.top - nr.top);
+        let mut holes = 0;
+        let mut differ = 0;
+        for y in by0.max(0)..ih {
+            for x in bx0.max(0)..iw {
+                let i = (y * iw + x) as usize;
+                if now[i] & 0xFFFFFF == paper_bgrx && done[i] & 0xFFFFFF != paper_bgrx {
+                    holes += 1;
+                }
+                if now[i] & 0xFFFFFF != done[i] & 0xFFFFFF {
+                    differ += 1;
+                }
+            }
+        }
+        total_differ += differ;
+        total_holes += holes;
+        steps += 1;
+        if holes > worst.0 {
+            worst = (holes, k as usize);
+            let _ = save_png(&f, &format!("{outdir}/worst_now.png"), iw, ih, &now);
+            let _ = save_png(&f, &format!("{outdir}/worst_done.png"), iw, ih, &done);
+        }
+        log.push(Json::default().n("step", k as f64).n("w", w as f64).n("white_holes_px", holes as f64).finish());
+    }
+    unsafe {
+        SendMessageW(h, WM_EXITSIZEMOVE, 0, 0);
+        SetWindowPos(h, std::ptr::null_mut(), -15000, -15000, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    pump_for(100);
+    log.insert(0, Json::default().n("cloaked", cloaked as f64).n("base_paper_px", base_white as f64).n("steps", steps as f64).n("white_holes_total_px", total_holes as f64).n("unfinished_total_px", total_differ as f64).n("worst_step", worst.1 as f64).n("worst_px", worst.0 as f64).finish());
+    crate::store::close();
+    metrics::append(&format!("{outdir}/flashprobe.jsonl"), &log.join("\n"));
 }

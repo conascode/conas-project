@@ -538,7 +538,7 @@ pub fn show_picture(h: HWND, d: &images::Decoded) {
     }
     unsafe {
         // frozen: the body shows the result once, not each delete / insert step
-        let frozen = doc.Freeze().is_ok();
+        let frozen = freeze(h);
         let (sa, sb) = get_sel(h);
         let mask = SendMessageW(h, EM_SETEVENTMASK, 0, 0);
         let _ = doc.Undo(tomSuspend.0);
@@ -546,8 +546,8 @@ pub fn show_picture(h: HWND, d: &images::Decoded) {
         let _ = doc.Undo(tomResume.0);
         select(h, sa, sb);
         SendMessageW(h, EM_SETEVENTMASK, 0, mask);
-        if frozen {
-            let _ = doc.Unfreeze();
+        if let Some(f) = frozen {
+            unfreeze(&f);
         }
     }
 }
@@ -587,17 +587,31 @@ pub fn refit_pictures(h: HWND, _last_width: f64) -> f64 {
     width
 }
 
+thread_local! {
+    /// TOM freezes held now (all bodies live on the UI thread)
+    static FROZEN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 /// Holds the body's display while the window is being resized (see `live_refit`).
 pub fn freeze(h: HWND) -> Option<ITextDocument2> {
     let d = tdoc(h)?;
     unsafe { d.Freeze().ok()? };
+    FROZEN.with(|f| f.set(f.get() + 1));
     Some(d)
 }
 
 pub fn unfreeze(d: &ITextDocument2) {
+    FROZEN.with(|f| f.set(f.get().saturating_sub(1)));
     unsafe {
         let _ = d.Unfreeze();
     }
+}
+
+/// True while a body is frozen: it must not be painted then — a frozen RichEdit draws
+/// nothing, so the paint showed bare paper, a white flash on every resize step (user report
+/// 2026-11-16). The update region stays and is painted once the freeze ends.
+pub fn is_frozen() -> bool {
+    FROZEN.with(|f| f.get() > 0)
 }
 
 /// During a resize (each WM_SIZE): pictures capped by the text width follow it at once —

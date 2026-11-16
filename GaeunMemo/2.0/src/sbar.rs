@@ -119,20 +119,32 @@ fn thumb(b: &Bar, track: i32, dpi: u32) -> (i32, i32) {
     (top, len)
 }
 
-fn scroll_to(b: &Bar, pos: i32) {
-    let pos = pos.clamp(0, (b.total - b.page).max(0));
+/// Scrolls the target to `pos` and shows the result at once. While the thumb is dragged the
+/// mouse keeps the queue busy, and WM_PAINT — sent only when nothing else waits — came in
+/// bursts, so the text and the thumb moved in jumps: both are painted here, every move.
+fn scroll_to(h: HWND, pos: i32) {
+    // copies only: the target's answer updates this bar's state again (sync_bar → set)
+    let Some((target, total, page, cur)) = (unsafe { state(h) }).map(|b| (b.target, b.total, b.page, b.pos)) else { return };
+    let pos = pos.clamp(0, (total - page).max(0));
+    if pos == cur {
+        return;
+    }
     unsafe {
-        match b.target {
+        let t = match target {
             Target::Rich(t) => {
                 let p = POINT { x: 0, y: pos };
                 SendMessageW(t, 0x04DE /* EM_SETSCROLLPOS */, 0, &p as *const _ as isize);
-                // the thumb follows at once, not only after the body's next paint
+                // the thumb follows the body's own position (it may round)
                 crate::body::sync_bar(t);
+                t
             }
             Target::Rows(t) => {
                 SendMessageW(t, WM_APP_SCROLLTO, 0, pos as isize);
+                t
             }
-        }
+        };
+        UpdateWindow(t);
+        UpdateWindow(h);
     }
 }
 
@@ -182,6 +194,8 @@ unsafe extern "system" fn proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
             0
         }
         WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
+        // the outer pixels along the window edge resize the window, not scroll
+        WM_NCHITTEST if crate::win::on_parent_edge(h, lp) => HTTRANSPARENT as LRESULT,
         WM_LBUTTONDOWN => {
             let Some(b) = state(h) else { return 0 };
             let mut rc: RECT = std::mem::zeroed();
@@ -193,7 +207,8 @@ unsafe extern "system" fn proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
                 SetCapture(h);
             } else {
                 // a click on the track: one page towards it (as Chromium's first step)
-                scroll_to(b, if y < top { b.pos - b.page } else { b.pos + b.page });
+                let to = if y < top { b.pos - b.page } else { b.pos + b.page };
+                scroll_to(h, to);
             }
             0
         }
@@ -206,7 +221,8 @@ unsafe extern "system" fn proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
                 let y = (lp >> 16) as i16 as i32;
                 let free = (rc.bottom - len).max(1) as f64;
                 let frac = ((y - grab) as f64 / free).clamp(0.0, 1.0);
-                scroll_to(b, (frac * (b.total - b.page).max(0) as f64).round() as i32);
+                let to = (frac * (b.total - b.page).max(0) as f64).round() as i32;
+                scroll_to(h, to);
             }
             0
         }

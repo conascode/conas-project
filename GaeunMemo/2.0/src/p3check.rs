@@ -232,6 +232,71 @@ pub fn run(data: &str, out: &str) {
     t.check("young orphan kept (24 h grace)", orphan_new.exists(), String::new());
     t.check("old referenced picture kept", file.exists(), String::new());
 
+    // ---- disk full (report §14.2): SQLite's own "database or disk is full", made by capping
+    // the file at its current size. Nothing typed is dropped: the commit is retried (1, 2, 4 …
+    // 60 s) and goes through once there is room again.
+    let db = dir.join("gaeunmemo.db");
+    let full = app::add("가득 참", "가득 전", Some(0), 0);
+    store::flush();
+    let full_uuid = app::note(full).map(|n| n.uuid).unwrap_or_default();
+    let pages = rusqlite::Connection::open(&db).and_then(|c| c.query_row("PRAGMA page_count", [], |r| r.get::<_, i64>(0))).unwrap_or(0);
+    store::send(store::Cmd::TestSql(format!("PRAGMA max_page_count = {pages}")));
+    let fails0 = store::FAILURES.load(Ordering::Relaxed);
+    let big: String = "가나다라마바사 ".repeat(25_000);
+    app::update(full, |n| {
+        n.text = big.clone();
+        n.html = big.clone();
+    });
+    pump_for(800);
+    let fails1 = store::FAILURES.load(Ordering::Relaxed);
+    let kept = store::read_row(&db, &full_uuid).map(|r| r.body_text).unwrap_or_default();
+    let logged = std::fs::read_to_string(dir.join("gaeunmemo.log")).unwrap_or_default();
+    t.check("disk full: the commit fails, is logged, and the stored note is the last good one", fails1 > fails0 && kept == "가득 전" && logged.contains("저장 실패"), format!("failures {fails0} → {fails1}, stored {} chars", kept.chars().count()));
+    t.check("disk full: the database still opens (quick_check)", rusqlite::Connection::open(&db).and_then(|c| c.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))).is_ok_and(|s| s == "ok"), String::new());
+    store::send(store::Cmd::TestSql("PRAGMA max_page_count = 1073741823".into()));
+    let t_room = Instant::now();
+    let mut back = false;
+    while t_room.elapsed() < Duration::from_secs(10) {
+        pump_for(100);
+        if store::read_row(&db, &full_uuid).is_some_and(|r| r.body_text == big) {
+            back = true;
+            break;
+        }
+    }
+    t.check("disk full: once there is room the waiting text is committed (retry)", back, format!("{:.1} s", t_room.elapsed().as_secs_f64()));
+
+    // ---- a picture file that cannot be written (full disk, no permission): the note row
+    // that refers to it waits with it — never a reference to a missing file — and both go
+    // in once the file can be written
+    let images = dir.join("images");
+    let parked = dir.join("images.parked");
+    let _ = std::fs::rename(&images, &parked);
+    let _ = std::fs::write(&images, b"not a folder");
+    let pnote = app::add("사진 실패", "", Some(0), 0);
+    let hp = open_off(pnote);
+    let bodyp = unsafe { note::state_of(hp).unwrap().body };
+    let png2 = images::sample_png(50, 40);
+    let fails2 = store::FAILURES.load(Ordering::Relaxed);
+    richedit::paste_for_test(bodyp, &richedit::test_data(vec![("PNG", png2.clone())]), false);
+    pump_for(800);
+    let puuid = app::note(pnote).map(|n| n.uuid).unwrap_or_default();
+    let pname = app::note(pnote).map(|n| store::image_refs(&n.html)).unwrap_or_default().into_iter().next().unwrap_or_default();
+    let row_html = store::read_row(&db, &puuid).map(|r| r.body_html).unwrap_or_default();
+    t.check("picture write fails: the row referring to it is not committed", !pname.is_empty() && !row_html.contains(&pname) && store::FAILURES.load(Ordering::Relaxed) > fails2, format!("{pname}, stored html {} chars", row_html.len()));
+    let _ = std::fs::remove_file(&images);
+    let _ = std::fs::rename(&parked, &images);
+    let t_pic = Instant::now();
+    let mut pic_back = false;
+    while t_pic.elapsed() < Duration::from_secs(10) {
+        pump_for(100);
+        if store::read_row(&db, &puuid).is_some_and(|r| r.body_html.contains(&pname)) {
+            pic_back = true;
+            break;
+        }
+    }
+    let on_disk = std::fs::read(images.join(&pname)).ok().as_deref() == Some(png2.as_slice());
+    t.check("picture write fails: file and row both go in once it can be written", pic_back && on_disk, format!("{:.1} s, file {on_disk}", t_pic.elapsed().as_secs_f64()));
+
     // ---- damaged database: kept in broken\, newest good backup restored
     for h in note::notes() {
         unsafe { DestroyWindow(h) };
@@ -288,6 +353,36 @@ pub fn kill_child(data: &str, label: &str) {
     let id = app::add("강제 종료", "", Some(0), 0);
     let h = open_off(id);
     pump_for(50);
+    let type_text = |text: &str| {
+        for ch in text.chars() {
+            let mut b = [0u16; 2];
+            type_into(h, ch.encode_utf16(&mut b).iter().map(|&u| char::from_u32(u as u32).unwrap_or(' ')).collect::<String>().as_str());
+            pump_for(20);
+        }
+    };
+    if label == "commit" {
+        // a first text, committed; then more typing whose commit the test kills inside the
+        // transaction (store::test_hold): the database must still hold exactly the first text
+        type_text("첫 저장 완료");
+        pump_for(400); // the throttled save goes out
+        crate::store::flush();
+        let _ = std::fs::write(dir.join("first.txt"), "첫 저장 완료");
+        let _ = std::fs::write(dir.join("hold"), b"1");
+        type_text(" 추가 입력");
+        loop {
+            pump_for(1000);
+        }
+    }
+    if label == "endsession" {
+        // log off: the test sends WM_QUERYENDSESSION / WM_ENDSESSION right after the last
+        // key and then kills the process, as Windows does after WM_ENDSESSION
+        type_text("강제 종료 시험 0123456789 마지막");
+        let _ = std::fs::write(dir.join("hwnd.txt"), format!("{}", h as isize));
+        let _ = std::fs::write(dir.join("typed.txt"), "강제 종료 시험 0123456789 마지막");
+        loop {
+            pump_for(1000);
+        }
+    }
     let typed = if label == "picture" {
         let body = unsafe { note::state_of(h).unwrap().body };
         let png = images::sample_png(120, 90);

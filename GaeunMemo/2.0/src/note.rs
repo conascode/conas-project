@@ -77,6 +77,8 @@ pub struct NoteState {
     pub normal_h: i32,
     /// text width (CSS px) the pictures were last fitted to
     pub pic_width: f64,
+    /// inside the modal size / move loop (an edge or the title bar is being dragged)
+    pub sizing: bool,
 }
 
 thread_local! {
@@ -158,6 +160,7 @@ pub fn open(id: u64, at: Option<(i32, i32)>, focus: bool) -> HWND {
             d2d: HwndTarget::default(),
             normal_h: h,
             pic_width: 0.0,
+            sizing: false,
         });
         let ex = if c.taskbar { WS_EX_APPWINDOW } else { WS_EX_TOOLWINDOW } | if n.pinned { WS_EX_TOPMOST } else { 0 };
         let style = WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
@@ -537,13 +540,13 @@ pub fn hit(s: &NoteState, sx: i32, sy: i32) -> u32 {
                 HTCAPTION
             };
         }
-        match (bottom, left, right) {
-            (true, true, _) => return HTBOTTOMLEFT,
-            (true, _, true) => return HTBOTTOMRIGHT,
-            (true, _, _) => return HTBOTTOM,
-            (_, true, _) => return HTLEFT,
-            (_, _, true) => return HTRIGHT,
-            _ => {}
+        let _ = (bottom, left, right);
+        // left / bottom / right bands (6 CSS px, corners 12) also over the body and its scroll
+        // bar (they answer HTTRANSPARENT there); along a scroll bar only its outer 3 px
+        let edge = px(6.0, s.dpi);
+        let edge_right = if crate::body::bar_visible(s.body) { px(3.0, s.dpi) } else { edge };
+        if let Some(code) = crate::win::edge_hit(p.x, p.y, w, h, edge, edge_right, px(12.0, s.dpi)) {
+            return code;
         }
     }
     if p.y < bar_bottom {
@@ -1068,12 +1071,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 crate::richedit::unfreeze(&d);
             }
             InvalidateRect(hwnd, std::ptr::null(), 0);
+            // the finished frame now, before the size loop goes on and DWM shows the window
+            // (otherwise the new size could show half-painted)
+            RedrawWindow(hwnd, std::ptr::null(), std::ptr::null_mut(), RDW_UPDATENOW | RDW_ALLCHILDREN);
             if !s.menu.is_null() {
                 menu::reposition_note_menu(s.menu, hwnd);
             }
             crate::confirm::resize(hwnd);
-            if s.pic_width > 0.0 {
-                SetTimer(hwnd, TIMER_REFIT, 150, None); // debounced: once the size settles
+            // the sharp picture copies once the size has settled: after the drag ends
+            // (WM_EXITSIZEMOVE) — a pause in the middle of a drag swapped soft and sharp
+            // copies back and forth, which flashed (user report 2026-11-16) — or 150 ms after
+            // a size change without a drag (maximise, 전체화면, Win+arrows)
+            if s.pic_width > 0.0 && !s.sizing {
+                SetTimer(hwnd, TIMER_REFIT, 150, None);
             }
             // 전체화면 by the menu, the icon, Win+↑ or by dragging out: remembered (F-29)
             let full = is_full(hwnd) && wp as u32 != SIZE_MINIMIZED;
@@ -1082,8 +1092,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             0
         }
+        WM_ENTERSIZEMOVE => {
+            s.sizing = true;
+            KillTimer(hwnd, TIMER_REFIT);
+            0
+        }
         WM_EXITSIZEMOVE => {
+            s.sizing = false;
             save_rect(s);
+            if s.pic_width > 0.0 {
+                SetTimer(hwnd, TIMER_REFIT, 1, None); // sharp copies now that the drag is over
+            }
             0
         }
         WM_QUERYENDSESSION => {
