@@ -113,8 +113,8 @@ pub fn capture_with(h: HWND, flags: u32) -> (i32, i32, Vec<u32>) {
 /// Pastes a captured popup at its position relative to `base`, clipped to the base window
 /// (v1.1 draws its menus inside the window).
 fn composite(base: HWND, img: &mut [u32], bw: i32, bh: i32, popup: HWND) {
-    if popup.is_null() || unsafe { IsWindow(popup) } == 0 {
-        return;
+    if popup.is_null() || unsafe { IsWindow(popup) } == 0 || unsafe { IsWindowVisible(popup) } == 0 {
+        return; // a hidden window (e.g. a scroll bar with nothing to scroll) is not on screen
     }
     let (pw, ph, p) = capture_with(popup, 0);
     let mut br = RECT { left: 0, top: 0, right: 0, bottom: 0 };
@@ -300,6 +300,13 @@ pub fn shots(cases_path: &str, outdir: &str, only: &str) {
             log.push(Json::default().s("popup", &c.name).n("vis", vis as f64).n("pending_update", upd as f64).n("w", pw as f64).n("h", ph as f64).n("px0", p.first().copied().unwrap_or(0) as f64).finish());
         }
         composite(target, &mut img, w, h, popup);
+        if !c.name.starts_with("list_") {
+            // WM_PRINT draws the body's system scroll bar (outside its window region on
+            // screen): the v1.1 bar window goes over it, as on screen
+            if let Some(s) = unsafe { note::state_of(target) } {
+                composite(target, &mut img, w, h, crate::body::bar_for_test(s.body));
+            }
+        }
         let path = format!("{outdir}\\{}.png", c.name);
         let ok = save_png(&f, &path, w, h, &img);
         log.push(Json::default().s("case", &c.name).n("w", w as f64).n("h", h as f64).b("saved", ok.is_ok()).finish());
@@ -415,7 +422,10 @@ pub fn notesnap(data: &str, outdir: &str) {
         let h = app::window_of(*id).unwrap();
         unsafe { RedrawWindow(h, std::ptr::null(), std::ptr::null_mut(), RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN) };
         pump_for(100);
-        let (w, hh, img) = capture_with(h, 0);
+        let (w, hh, mut img) = capture_with(h, 0);
+        // WM_PRINT paints the body without its window region, so its system scroll bar (kept
+        // outside the clip on screen) shows: lay the v1.1 bar window over it, as on screen
+        composite(h, &mut img, w, hh, crate::body::bar_for_test(unsafe { note::state_of(h).unwrap().body }));
         let path = format!("{outdir}/note{id}.png");
         let ok = save_png(&f, &path, w, hh, &img);
         // mouse wheel: scroll position (px) right after each notch down and 400 ms later
@@ -434,6 +444,15 @@ pub fn notesnap(data: &str, outdir: &str) {
             ys.push(format!("[{now},{}]", pos()));
         }
         log.push(Json::default().n("note", *id as f64).n("w", w as f64).n("h", hh as f64).b("saved", ok.is_ok()).raw("wheel_y", format!("[{}]", ys.join(","))).finish());
+        // the v1.1 scroll bar window on its own
+        unsafe {
+            let bar = crate::body::bar_for_test(body);
+            let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetWindowRect(bar, &mut r);
+            log.push(Json::default().n("bar_visible", IsWindowVisible(bar) as f64).raw("bar_size", format!("[{},{}]", r.right - r.left, r.bottom - r.top)).finish());
+            let (bw, bh, bimg) = capture_with(bar, 0);
+            let _ = save_png(&f, &format!("{outdir}/note{id}_bar.png"), bw, bh, &bimg);
+        }
         // narrowed to 60 %: captured right after WM_SIZE (what the next frame shows), then
         // after the sharp copies came
         unsafe {
@@ -446,6 +465,19 @@ pub fn notesnap(data: &str, outdir: &str) {
         pump_for(2000);
         let (nw, nh, img) = capture_with(h, 0);
         let _ = save_png(&f, &format!("{outdir}/note{id}_narrow_settled.png"), nw, nh, &img);
+    }
+    // the list window, with its v1.1 scroll bar laid over the capture (as on screen)
+    list::open(false);
+    let lh = list::hwnd();
+    if !lh.is_null() {
+        let dpi = unsafe { GetDpiForWindow(lh) };
+        unsafe { SetWindowPos(lh, std::ptr::null_mut(), -15000, -12000, px(280.0, dpi), px(380.0, dpi), SWP_NOZORDER | SWP_NOACTIVATE) };
+        pump_for(200);
+        let bar = list::bar_for_test();
+        let (w, hh, mut img) = capture_with(lh, 0);
+        composite(lh, &mut img, w, hh, bar);
+        let _ = save_png(&f, &format!("{outdir}/list.png"), w, hh, &img);
+        log.push(Json::default().s("list", "captured").n("bar_visible", unsafe { IsWindowVisible(bar) } as f64).finish());
     }
     crate::store::close();
     metrics::append(&format!("{outdir}/notesnap.jsonl"), &log[1..].join("\n"));

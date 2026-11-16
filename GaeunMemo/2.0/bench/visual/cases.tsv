@@ -30,3 +30,5 @@ list_dark_noresult	dark	thin	280	380	0	search=zzzz
 list_light_ctx	light	thin	280	380	0	ctx
 note_dark_select	dark	thin	260	260	0	select	장보기	우유 2개\n계란 한 판
 note_light_select	light	thin	260	260	1	select	회의 메모	다음 주 화요일 오후 3시\n3층 회의실
+note_light_scroll	light	thin	260	260	4	-	긴 메모	1줄 가나다라마바사\n2줄 가나다라마바사\n3줄 가나다라마바사\n4줄 가나다라마바사\n5줄 가나다라마바사\n6줄 가나다라마바사\n7줄 가나다라마바사\n8줄 가나다라마바사\n9줄 가나다라마바사\n10줄 가나다라마바사\n11줄 가나다라마바사\n12줄 가나다라마바사\n13줄 가나다라마바사\n14줄 가나다라마바사
+note_dark_scroll	dark	thin	260	260	0	-	긴 메모	1줄 가나다라마바사\n2줄 가나다라마바사\n3줄 가나다라마바사\n4줄 가나다라마바사\n5줄 가나다라마바사\n6줄 가나다라마바사\n7줄 가나다라마바사\n8줄 가나다라마바사\n9줄 가나다라마바사\n10줄 가나다라마바사\n11줄 가나다라마바사\n12줄 가나다라마바사\n13줄 가나다라마바사\n14줄 가나다라마바사

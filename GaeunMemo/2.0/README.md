@@ -36,6 +36,7 @@ another folder. Things to try:
 | `src/rich.rs` | v1.1 `rich.js` in Rust: HTML tokenizer + tree builder, allow-list sanitizer, `innerHTML`, Chromium `innerText` (the `text` copy), on-screen document model, one-pass save |
 | `src/richedit.rs`, `src/rtfread.rs` | The body ↔ document (RTF as in-memory transport), paste / drop routing (`IRichEditOleCallback`), copy / drag data object, picture refit after a resize |
 | `src/images.rs` | Pictures: sniffing (png / jpg / gif / webp, ≤ 25 MB), decoding thread (display-size copies, generation numbers, ends after 60 s idle), 64 MB in-memory limit, placeholder for missing files, 사진 넣기 picker |
+| `src/sbar.rs` | v1.1's scroll bar (8 px, square thumb in the rule colour on the paper), drawn over the note body and the list; the body's system bar stays outside its window region and only supplies the range |
 | `src/note.rs`, `src/body.rs`, `src/app.rs` | Note window, RichEdit body, model; every change goes to the store; saved places restored (off-screen places fall back). The body scrolls by the wheel itself (v1.1 distance, at once, no animation) and draws large repaints off-screen (no flash); pictures follow a resize in the same `WM_SIZE` (`images::live`), the sharp copy comes once the size settles |
 | `src/p3check.rs`, `bench/p3/kill.py` | `--mode p3check` (store checks on a new test folder) and the forced-termination test (`--mode p3kill` child, killed 0 / 100 / 350 ms after typing) |
 | `src/p2check.rs`, `bench/rich/*` | P2 checks and the differential test against v1.1's real `ui/rich.js` |

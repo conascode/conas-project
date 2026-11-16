@@ -80,6 +80,96 @@ const PROP_FONT: &str = "gm_font";
 const PROP_KIND: &str = "gm_kind";
 /// wheel distance not scrolled yet (a touchpad's small steps), in 1/1024 px
 const PROP_WHEEL: &str = "gm_wheel";
+/// the v1.1 scroll bar window (crate::sbar) that sits over the body's right edge
+const PROP_BAR: &str = "gm_bar";
+
+pub fn bar_for_test(h: HWND) -> HWND {
+    bar_of(h)
+}
+
+fn bar_of(h: HWND) -> HWND {
+    prop(h, PROP_BAR) as HWND
+}
+
+fn native_bar_w(h: HWND) -> i32 {
+    unsafe { windows_sys::Win32::UI::HiDpi::GetSystemMetricsForDpi(SM_CXVSCROLL, GetDpiForWindow(h).max(96)) }
+}
+
+/// Puts the body in the note: the RichEdit is made wider by the system scroll bar's width
+/// minus the 8 px of v1.1's bar and clipped to the visible part, so its own (system) scroll
+/// bar lies outside the clip — it only supplies the range — and `sbar` draws the v1.1 bar
+/// over the right 8 px. With no bar the text area is the whole width (set_padding).
+pub fn place(h: HWND, x: i32, y: i32, w: i32, hh: i32) {
+    if h.is_null() {
+        return;
+    }
+    unsafe {
+        if !is_rich(h) {
+            SetWindowPos(h, std::ptr::null_mut(), x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+            return;
+        }
+        let dpi = GetDpiForWindow(h).max(96);
+        let sb = px(crate::sbar::WIDTH, dpi);
+        let ww = (w - sb + native_bar_w(h)).max(1);
+        SetWindowPos(h, std::ptr::null_mut(), x, y, ww, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowRgn(h, CreateRectRgn(0, 0, w.max(1), hh.max(1)), 1);
+        let bar = bar_of(h);
+        if !bar.is_null() {
+            // v1.1's bar runs to the window's right edge with its last pixel under the 1 px
+            // border: it starts `sb` from that edge and shows `sb - 1` (the body itself is
+            // inset by `x` on both sides, so the edge is at x + w + x)
+            let edge = x + w + x;
+            SetWindowPos(bar, std::ptr::null_mut(), edge - sb, y, sb - 1, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        set_padding(h);
+        sync_bar(h);
+    }
+}
+
+/// Shows or hides the body together with its scroll bar.
+pub fn set_visible(h: HWND, on: bool) {
+    if h.is_null() {
+        return;
+    }
+    unsafe {
+        ShowWindow(h, if on { SW_SHOWNA } else { SW_HIDE });
+        if on {
+            sync_bar(h);
+        } else {
+            crate::sbar::hide(bar_of(h));
+        }
+    }
+}
+
+/// True while the system scroll bar (outside the clip) is there: the client is narrower
+/// than the window by its width.
+fn native_bar_shown(h: HWND) -> bool {
+    unsafe {
+        let mut wr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut cr = wr;
+        GetWindowRect(h, &mut wr);
+        GetClientRect(h, &mut cr);
+        wr.right - wr.left - cr.right > 0
+    }
+}
+
+/// The v1.1 bar follows the body's scroll range (called after painting and layout).
+pub fn sync_bar(h: HWND) {
+    let bar = bar_of(h);
+    if bar.is_null() || unsafe { IsWindowVisible(h) } == 0 {
+        return;
+    }
+    unsafe {
+        let mut si: SCROLLINFO = std::mem::zeroed();
+        si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
+        si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+        if native_bar_shown(h) && GetScrollInfo(h, SB_VERT as i32, &mut si) != 0 {
+            crate::sbar::set(bar, si.nMax - si.nMin + 1, si.nPage as i32, si.nPos);
+        } else {
+            crate::sbar::set(bar, 0, 0, 0);
+        }
+    }
+}
 
 /// The whole body into `dc`: background, RichEdit's own drawing (WM_PRINTCLIENT), the
 /// "메모" placeholder. The background is filled first because RichEdit leaves the padding
@@ -134,6 +224,7 @@ fn paint(h: HWND, locked: bool) {
         } else {
             paint_buffered(h, locked);
         }
+        sync_bar(h);
     }
 }
 
@@ -171,11 +262,74 @@ fn paint_buffered(h: HWND, locked: bool) {
     }
 }
 
+/// Touchpad momentum filter. After the fingers lift, the touchpad driver keeps sending
+/// wheel values that shrink step by step (momentum); the body should only move by what the
+/// fingers did. A mouse wheel sends whole notches (multiples of 120) and is never touched.
+/// Touchpad values (not multiples of 120) that come close together and fall at least 5 %
+/// each, four times in a row, are momentum: they and the rest of that run are dropped
+/// until a pause (> 120 ms), a sign change, or a value that grows again (new gesture).
+/// A heuristic — the OS does not mark momentum values — so a finger that slows down very
+/// smoothly loses its last few small steps.
+pub struct Momentum {
+    last: Option<(i32, std::time::Instant)>,
+    falling: u32,
+    dropping: bool,
+}
+
+thread_local! {
+    static MOMENTUM: std::cell::RefCell<Momentum> = const { std::cell::RefCell::new(Momentum { last: None, falling: 0, dropping: false }) };
+}
+
+pub fn is_inertia(delta: i32, now: std::time::Instant) -> bool {
+    MOMENTUM.with(|m| m.borrow_mut().feed(delta, now))
+}
+
+impl Momentum {
+    pub fn feed(&mut self, delta: i32, now: std::time::Instant) -> bool {
+        if delta % 120 == 0 {
+            *self = Momentum { last: None, falling: 0, dropping: false };
+            return false; // a mouse wheel notch
+        }
+        let mag = delta.abs();
+        let continues = self.last.is_some_and(|(p, t)| {
+            now.duration_since(t) <= std::time::Duration::from_millis(120) && p.signum() == delta.signum()
+        });
+        let prev = self.last.map_or(0, |(p, _)| p.abs());
+        self.last = Some((delta, now));
+        if !continues {
+            self.falling = 0;
+            self.dropping = false;
+            return false;
+        }
+        if self.dropping {
+            if mag * 2 > prev * 3 {
+                self.dropping = false; // grows again: the fingers are back
+                self.falling = 0;
+                return false;
+            }
+            return true;
+        }
+        if mag * 100 <= prev * 95 {
+            self.falling += 1;
+        } else {
+            self.falling = 0;
+        }
+        if self.falling >= 4 {
+            self.dropping = true;
+            return true;
+        }
+        false
+    }
+}
+
 /// Mouse wheel: the body moves exactly the distance turned, at once — v1.1 (Chromium)
 /// distance, 100 CSS px per three lines of the system wheel setting (one notch at the default
 /// 3 lines), or a page. RichEdit's own wheel handling scrolls whole lines (a picture is one
 /// tall line, so one notch skipped all of it) and animates on after the wheel stops.
 pub fn wheel(h: HWND, delta: i32) {
+    if is_inertia(delta, std::time::Instant::now()) {
+        return;
+    }
     unsafe {
         let dpi = GetDpiForWindow(h).max(96) as f64;
         let mut lines: u32 = 3;
@@ -203,6 +357,7 @@ pub fn wheel(h: HWND, delta: i32) {
         if y != p.y {
             let np = POINT { x: p.x, y };
             SendMessageW(h, re::EM_SETSCROLLPOS, 0, &np as *const _ as isize);
+            sync_bar(h);
         }
     }
 }
@@ -245,6 +400,7 @@ pub fn create(parent: HWND, kind: BodyKind, dpi: u32, text: &str, font_size: u8)
                     return h;
                 }
                 set_prop(h, PROP_KIND, 1);
+                set_prop(h, PROP_BAR, crate::sbar::create(parent, crate::sbar::Target::Rich(h)) as isize);
                 SendMessageW(h, re::EM_SETTEXTMODE, (re::TM_RICHTEXT.0 | re::TM_MULTILEVELUNDO.0) as usize, 0);
                 SendMessageW(h, re::EM_EXLIMITTEXT, 0, 2_000_000);
                 // paste / drop / copy follow v1.1's rules (crate::richedit)
@@ -307,6 +463,9 @@ pub fn apply_theme(h: HWND) {
             SetWindowTheme_dark(h);
         }
         InvalidateRect(h, std::ptr::null(), 1);
+        if !bar_of(h).is_null() {
+            InvalidateRect(bar_of(h), std::ptr::null(), 0);
+        }
     }
 }
 
@@ -365,7 +524,10 @@ pub fn set_padding(h: HWND) {
         let dpi = GetDpiForWindow(h);
         let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         GetClientRect(h, &mut rc);
-        let r = RECT { left: px(12.0, dpi) - px(1.0, dpi).max(1), top: px(4.0, dpi), right: rc.right - px(12.0, dpi), bottom: rc.bottom - px(12.0, dpi) };
+        // without the (hidden) system bar the client is wider than what shows: keep the 12 px
+        // right padding at the visible edge
+        let hidden = if native_bar_shown(h) { 0 } else { (native_bar_w(h) - px(crate::sbar::WIDTH, dpi)).max(0) };
+        let r = RECT { left: px(12.0, dpi) - px(1.0, dpi).max(1), top: px(4.0, dpi), right: rc.right - px(12.0, dpi) - hidden, bottom: rc.bottom - px(12.0, dpi) };
         SendMessageW(h, windows_sys::Win32::UI::Controls::EM_SETRECT, 0, &r as *const _ as isize);
     }
 }
@@ -540,6 +702,7 @@ unsafe extern "system" fn body_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _
             if is_rich(h) {
                 // also when only the scroll bar came or went (the text width changed)
                 crate::richedit::live_refit(h);
+                sync_bar(h);
             }
             return r;
         }
@@ -553,11 +716,68 @@ unsafe extern "system" fn body_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _
         }
         WM_NCDESTROY => {
             RemoveWindowSubclass(h, Some(body_proc), 7);
-            for k in [PROP_LOCKED, PROP_FONT, PROP_KIND, PROP_WHEEL] {
+            for k in [PROP_LOCKED, PROP_FONT, PROP_KIND, PROP_WHEEL, PROP_BAR] {
                 RemovePropW(h, wide(k).as_ptr());
             }
         }
         _ => {}
     }
     DefSubclassProc(h, msg, wp, lp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Momentum;
+    use std::time::{Duration, Instant};
+
+    fn run(deltas: &[i32], gap_ms: u64) -> Vec<bool> {
+        let mut m = Momentum { last: None, falling: 0, dropping: false };
+        let t0 = Instant::now();
+        deltas.iter().enumerate().map(|(k, &d)| m.feed(d, t0 + Duration::from_millis(k as u64 * gap_ms))).collect()
+    }
+
+    #[test]
+    fn mouse_notches_are_never_momentum() {
+        assert!(run(&[-120, -120, -240, -120, -120, -120, -120], 10).iter().all(|d| !d));
+    }
+
+    #[test]
+    fn fingers_speeding_up_and_slowing_slightly_keep_moving() {
+        // rises, noisy plateau: no four falling steps in a row
+        let v = [-10, -18, -30, -44, -52, -50, -53, -49, -52, -47, -51];
+        assert!(run(&v, 8).iter().all(|d| !d));
+    }
+
+    #[test]
+    fn decaying_tail_is_dropped_after_four_falling_steps() {
+        let v = [-40, -80, -120 + 1, -110, -100, -90, -80, -72, -64, -56, -48, -40, -30, -20, -10];
+        let d = run(&v, 8);
+        let kept: i32 = v.iter().zip(&d).filter(|(_, &x)| !x).map(|(&a, _)| a).sum();
+        assert!(d[..6].iter().all(|x| !x), "{d:?}"); // the fingers' part and the first fall
+        assert!(d[7..].iter().all(|x| *x), "{d:?}");
+        assert!(kept > -700, "{kept}");
+    }
+
+    #[test]
+    fn a_new_gesture_after_a_pause_moves_again() {
+        let mut m = Momentum { last: None, falling: 0, dropping: false };
+        let t0 = Instant::now();
+        for (k, d) in [-100, -90, -80, -70, -60, -50, -40].iter().enumerate() {
+            m.feed(*d, t0 + Duration::from_millis(k as u64 * 8));
+        }
+        assert!(m.dropping);
+        assert!(!m.feed(-30, t0 + Duration::from_millis(500)));
+        assert!(!m.feed(-45, t0 + Duration::from_millis(508)));
+    }
+
+    #[test]
+    fn growing_again_ends_the_drop() {
+        let mut m = Momentum { last: None, falling: 0, dropping: false };
+        let t0 = Instant::now();
+        for (k, d) in [-100, -90, -80, -70, -60, -50].iter().enumerate() {
+            m.feed(*d, t0 + Duration::from_millis(k as u64 * 8));
+        }
+        assert!(m.dropping);
+        assert!(!m.feed(-90, t0 + Duration::from_millis(60)));
+    }
 }

@@ -58,6 +58,11 @@ fn remember(h: HWND, open: bool) {
 pub fn is_open() -> bool {
     !LIST.with(|l| l.get()).is_null()
 }
+/// Test helper: the list's v1.1 scroll bar window.
+pub fn bar_for_test() -> HWND {
+    unsafe { st(hwnd()).map_or(std::ptr::null_mut(), |s| s.vbar) }
+}
+
 pub fn hwnd() -> HWND {
     LIST.with(|l| l.get())
 }
@@ -76,6 +81,7 @@ pub struct Item {
 struct State {
     search: HWND,
     rows: HWND,
+    vbar: HWND,
     hot: Option<usize>,
     down: Option<usize>,
     ctx: Option<u64>,
@@ -210,7 +216,7 @@ pub fn open(focus: bool) {
         }
         // test / measurement modes: created off-screen, so nothing ever flashes on the user's desktop
         let (x, y) = if crate::cfg().onscreen { (x, y) } else { (-15000, -15000) };
-        let s = Box::new(State { search: std::ptr::null_mut(), rows: std::ptr::null_mut(), hot: None, down: None, ctx: None });
+        let s = Box::new(State { search: std::ptr::null_mut(), rows: std::ptr::null_mut(), vbar: std::ptr::null_mut(), hot: None, down: None, ctx: None });
         let h = CreateWindowExW(
             WS_EX_TOOLWINDOW,
             wide(CLASS).as_ptr(),
@@ -297,16 +303,9 @@ pub fn apply_theme() {
     unsafe {
         relayout(h);
         if let Some(s) = st(h) {
-            dark_scrollbar(s.rows);
+            InvalidateRect(s.vbar, std::ptr::null(), 0);
         }
         RedrawWindow(h, std::ptr::null(), std::ptr::null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
-    }
-}
-
-fn dark_scrollbar(h: HWND) {
-    let name = if app::theme() == crate::theme::Theme::Dark { "DarkMode_Explorer" } else { "Explorer" };
-    unsafe {
-        let _ = windows::Win32::UI::Controls::SetWindowTheme(windows::Win32::Foundation::HWND(h), &windows::core::HSTRING::from(name), windows::core::PCWSTR::null());
     }
 }
 
@@ -369,7 +368,6 @@ fn relayout(h: HWND) {
         let pad = px(10.0, dpi);
         let y = l.search_box.top + (l.search_box.bottom - l.search_box.top - lh) / 2;
         SetWindowPos(s.search, std::ptr::null_mut(), l.search_box.left + pad, y, l.search_box.right - l.search_box.left - 2 * pad, lh, SWP_NOZORDER | SWP_NOACTIVATE);
-        SetWindowPos(s.rows, std::ptr::null_mut(), l.rows.left, l.rows.top, l.rows.right - l.rows.left, (l.rows.bottom - l.rows.top).max(1), SWP_NOZORDER | SWP_NOACTIVATE);
         SendMessageW(s.search, WM_SETFONT, f as usize, 1);
         update_scroll(s.rows);
     }
@@ -470,8 +468,8 @@ unsafe extern "system" fn list_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             SendMessageW(s.search, EM_SETMARGINS, 3, 0);
             SetWindowSubclass(s.search, Some(search_proc), 2, 0);
             let r = Box::new(Rows { items: Vec::new(), scroll: 0, hot: None, focus: None, keyboard: false, total: 0 });
-            s.rows = CreateWindowExW(0, wide(ROWS).as_ptr(), std::ptr::null(), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_VSCROLL, 0, 0, 10, 10, h, std::ptr::null_mut(), hinst, Box::into_raw(r) as *const _);
-            dark_scrollbar(s.rows);
+            s.rows = CreateWindowExW(0, wide(ROWS).as_ptr(), std::ptr::null(), WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS, 0, 0, 10, 10, h, std::ptr::null_mut(), hinst, Box::into_raw(r) as *const _);
+            s.vbar = crate::sbar::create(h, crate::sbar::Target::Rows(s.rows));
             relayout(h);
             rebuild(s.rows, s.search);
             SetTimer(h, TIMER_AGO, 60_000, None); // keep "n분 전" fresh while the list is open
@@ -707,8 +705,24 @@ fn update_scroll(h: HWND) {
         GetClientRect(h, &mut rc);
         let total = content_h(r, dpi);
         r.scroll = r.scroll.clamp(0, (total - rc.bottom).max(0));
-        let si = SCROLLINFO { cbSize: std::mem::size_of::<SCROLLINFO>() as u32, fMask: SIF_ALL, nMin: 0, nMax: (total - 1).max(0), nPage: rc.bottom.max(0) as u32, nPos: r.scroll, nTrackPos: 0 };
-        windows_sys::Win32::UI::Controls::SetScrollInfo(h, SB_VERT as i32, &si, 1);
+        // v1.1 scroll bar (8 px, takes its width from the rows only while there is something
+        // to scroll); the rows are placed here, from the list's layout
+        let list = GetParent(h);
+        let Some(s) = st(list) else { return };
+        let l = lay(list);
+        let sb = px(crate::sbar::WIDTH, dpi);
+        let area_h = (l.rows.bottom - l.rows.top).max(1);
+        let need = total > area_h;
+        let w = l.rows.right - l.rows.left - if need { sb } else { 0 };
+        let mut cur = rect(0, 0, 0, 0);
+        GetWindowRect(h, &mut cur);
+        if cur.right - cur.left != w || cur.bottom - cur.top != area_h {
+            SetWindowPos(h, std::ptr::null_mut(), l.rows.left, l.rows.top, w, area_h, SWP_NOZORDER | SWP_NOACTIVATE);
+            return; // WM_SIZE calls this again at the new size
+        }
+        // as in the note: from `sb` before the window edge, the last pixel under the border
+        SetWindowPos(s.vbar, std::ptr::null_mut(), l.rows.right + 1 - sb, l.rows.top, sb - 1, area_h, SWP_NOZORDER | SWP_NOACTIVATE);
+        crate::sbar::set(s.vbar, total, area_h, r.scroll);
     }
 }
 
@@ -888,18 +902,8 @@ unsafe extern "system" fn rows_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             InvalidateRect(h, std::ptr::null(), 0);
             0
         }
-        WM_VSCROLL => {
-            let mut rc = rect(0, 0, 0, 0);
-            GetClientRect(h, &mut rc);
-            let line = px(40.0, GetDpiForWindow(h));
-            match (wp & 0xFFFF) as i32 {
-                0 /* SB_LINEUP */ => r.scroll -= line,
-                1 /* SB_LINEDOWN */ => r.scroll += line,
-                2 /* SB_PAGEUP */ => r.scroll -= rc.bottom,
-                3 /* SB_PAGEDOWN */ => r.scroll += rc.bottom,
-                5 /* SB_THUMBTRACK */ => r.scroll = ((wp >> 16) & 0xFFFF) as i32,
-                _ => {}
-            }
+        crate::sbar::WM_APP_SCROLLTO => {
+            r.scroll = lp as i32;
             update_scroll(h);
             InvalidateRect(h, std::ptr::null(), 0);
             0

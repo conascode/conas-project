@@ -383,6 +383,64 @@ pub fn run(input: &str, out: &str) {
     turn(-120);
     t.check("wheel: a tall picture is scrolled through, not skipped", notch == 0 || scroll_y() == notch, format!("{} px, expected {notch}", scroll_y()));
 
+    // ---- the v1.1 scroll bar (8 px, square thumb in the rule colour, own window over the body)
+    let bar = body::bar_for_test(h);
+    let bar_w = |b: HWND| unsafe {
+        let mut r = windows_sys::Win32::Foundation::RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        GetClientRect(b, &mut r);
+        (r.right, r.bottom)
+    };
+    richedit::load(h, &Doc::default());
+    pump();
+    let short_w = richedit::text_css_width(h);
+    t.check("scroll bar: hidden when the note fits", unsafe { IsWindowVisible(bar) } == 0, String::new());
+    richedit::load(h, &sample_doc(10_000));
+    set_y(0);
+    pump();
+    let long_w = richedit::text_css_width(h);
+    let (bw, bh) = bar_w(bar);
+    // 8 CSS px from the window edge; the last pixel lies under the 1 px border (as in v1.1)
+    let edge_ok = unsafe {
+        let (mut nr, mut br) = (std::mem::zeroed::<windows_sys::Win32::Foundation::RECT>(), std::mem::zeroed::<windows_sys::Win32::Foundation::RECT>());
+        GetWindowRect(hw, &mut nr);
+        GetWindowRect(bar, &mut br);
+        br.right == nr.right - 1
+    };
+    t.check("scroll bar: shown when it scrolls, 8 CSS px to the window edge", unsafe { IsWindowVisible(bar) } != 0 && bw == (8.0 * dpi / 96.0).round() as i32 - 1 && edge_ok, format!("{bw}×{bh} px, ends at the border: {edge_ok}"));
+    t.check("scroll bar: takes 8 CSS px from the text width (v1.1)", (short_w - long_w - 8.0).abs() < 0.6, format!("{short_w:.1} → {long_w:.1} CSS px"));
+    let lp = |x: i32, y: i32| (((y as u32) << 16) | (x as u32 & 0xFFFF)) as isize;
+    let max_y = {
+        let mut si: SCROLLINFO = unsafe { std::mem::zeroed() };
+        si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
+        si.fMask = SIF_RANGE | SIF_PAGE;
+        unsafe { GetScrollInfo(h, SB_VERT as i32, &mut si) };
+        si.nMax - si.nPage as i32 + 1
+    };
+    // thumb at the top: grab it near its top edge, pull to the bottom of the track
+    unsafe {
+        SendMessageW(bar, WM_LBUTTONDOWN, 1, lp(bw / 2, 3));
+        SendMessageW(bar, WM_MOUSEMOVE, 1, lp(bw / 2, bh + 50));
+        SendMessageW(bar, WM_LBUTTONUP, 0, lp(bw / 2, bh + 50));
+    }
+    t.check("scroll bar: dragging the thumb to the end scrolls to the end", scroll_y() == max_y, format!("{} / {max_y} px", scroll_y()));
+    unsafe {
+        SendMessageW(bar, WM_LBUTTONDOWN, 1, lp(bw / 2, bh - 3));
+        SendMessageW(bar, WM_MOUSEMOVE, 1, lp(bw / 2, -50));
+        SendMessageW(bar, WM_LBUTTONUP, 0, lp(bw / 2, -50));
+    }
+    t.check("scroll bar: dragging back to the top", scroll_y() == 0, format!("{} px", scroll_y()));
+    let page = {
+        let mut si: SCROLLINFO = unsafe { std::mem::zeroed() };
+        si.cbSize = std::mem::size_of::<SCROLLINFO>() as u32;
+        si.fMask = SIF_PAGE;
+        unsafe { GetScrollInfo(h, SB_VERT as i32, &mut si) };
+        si.nPage as i32
+    };
+    unsafe { SendMessageW(bar, WM_LBUTTONDOWN, 1, lp(bw / 2, bh - 3)) };
+    unsafe { SendMessageW(bar, WM_LBUTTONUP, 0, lp(bw / 2, bh - 3)) };
+    t.check("scroll bar: a click below the thumb scrolls one page", (scroll_y() - page).abs() <= 2, format!("{} px, page {page}", scroll_y()));
+    set_y(0);
+
     // ---- resizing with pictures (user report 2026-11-14): pictures follow the new width in
     // the same WM_SIZE (v1.1 max-width: 100%), not after a pause; the sharp copy follows
     let big = images::add(images::sample_png(900, 300)).unwrap_or_default();

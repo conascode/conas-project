@@ -145,8 +145,10 @@ def shoot(html: Path, png: Path, w, h):
     if raw.exists():
         raw.unlink()
     profile = Path(tempfile.gettempdir()) / "gm-ref-edge-profile"
+    # headless hides scroll bars unless told otherwise; the *_scroll cases are about them
+    hide = [] if "scroll" in png.stem else ["--hide-scrollbars"]
     subprocess.run([EDGE, "--headless=new", f"--user-data-dir={profile}", "--no-first-run", "--disable-extensions",
-                    "--hide-scrollbars", f"--force-device-scale-factor={SCALE}", f"--window-size={max(w, 900)},{max(h, 700)}",
+                    *hide, f"--force-device-scale-factor={SCALE}", f"--window-size={max(w, 900)},{max(h, 700)}",
                     "--virtual-time-budget=3000", "--allow-file-access-from-files", f"--screenshot={raw}", frame.as_uri()],
                    capture_output=True, timeout=120)
     for _ in range(40):

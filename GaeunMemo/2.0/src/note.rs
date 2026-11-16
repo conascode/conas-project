@@ -324,15 +324,13 @@ fn relayout(s: &mut NoteState) {
     let full = is_full(s.hwnd);
     let l = layout(w, s.dpi, &n, full, s.hover);
     if !s.body.is_null() {
-        unsafe {
-            if n.folded {
-                ShowWindow(s.body, SW_HIDE);
-            } else {
-                // inside the 1 px edge; padding is the RichEdit format rect (body::set_padding)
-                let one = px(1.0, s.dpi).max(1);
-                SetWindowPos(s.body, std::ptr::null_mut(), one, l.body_top, (w - 2 * one).max(1), (h - l.body_top - one).max(1), SWP_NOZORDER | SWP_NOACTIVATE);
-                ShowWindow(s.body, SW_SHOWNA);
-            }
+        if n.folded {
+            body::set_visible(s.body, false);
+        } else {
+            // inside the 1 px edge; padding is the RichEdit format rect (body::set_padding)
+            let one = px(1.0, s.dpi).max(1);
+            body::place(s.body, one, l.body_top, (w - 2 * one).max(1), (h - l.body_top - one).max(1));
+            body::set_visible(s.body, true);
         }
     }
     if !s.title_edit.is_null() {

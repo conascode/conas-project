@@ -33,6 +33,7 @@ mod render;
 mod rich;
 mod richedit;
 mod rtfread;
+mod sbar;
 mod selftest;
 mod store;
 mod theme;
