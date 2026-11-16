@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<!-- Chromium side of bench/rich/diff.py: v1.1's own ui/rich.js, a note body styled like
+     v1.1's .body (pre-wrap, 14px/1.6 Malgun Gothic, lists and block pictures), and a
+     measurement of what is on screen: lines (by glyph position), bullet markers, b/i/u/s bits
+     per character, pictures. No network: pictures get no src. -->
+<style>
+  .body { white-space: pre-wrap; overflow-wrap: normal; font: 400 14px/1.6 "Malgun Gothic"; width: 100000px; padding: 0; margin: 0; }
+  .body ul { margin: 0; padding-left: 1.3em; }
+  .body img { display: block; max-width: 100%; height: auto; margin: 4px 0; }
+</style>
+<script src="../../../gaeunmemo/ui/rich.js"></script>
+</head>
+<body>
+<div id="host"></div>
+<script>
+'use strict';
+const host = document.getElementById('host');
+
+function bitsOf(node, root) {
+  let b = 0;
+  for (let e = node.parentElement; e && e !== root; e = e.parentElement) {
+    const t = e.tagName;
+    if (t === 'B') b |= 1; else if (t === 'I') b |= 2; else if (t === 'U') b |= 4; else if (t === 'S') b |= 8;
+  }
+  return b;
+}
+function liOf(node, root) {
+  for (let e = node.nodeType === 1 ? node : node.parentElement; e && e !== root; e = e.parentElement) if (e.tagName === 'LI') return e;
+  return null;
+}
+
+// On-screen lines: every glyph / <br> / newline registers on the line at its y position.
+function visual(root) {
+  const lines = [];
+  let cur = null;
+  const range = document.createRange();
+  const at = (top, node) => {
+    if (cur && !cur.forceNew && Math.abs(cur.top - top) < 1) return cur;
+    const li = liOf(node, root);
+    // the marker sits on an item's first line (glyph tops sit below the li box top by the half-leading)
+    const marker = !!li && !lines.some((l) => l.li === li);
+    cur = { top, items: [], marker, li };
+    lines.push(cur);
+    return cur;
+  };
+  const push = (line, text, bits) => {
+    const last = line.items[line.items.length - 1];
+    if (last && last[0] !== '#img' && last[1] === bits) last[0] += text; else line.items.push([text, bits]);
+  };
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+    if (n.nodeType === 3) {
+      const bits = bitsOf(n, root);
+      const s = n.data;
+      for (let k = 0; k < s.length; k++) {
+        const size = s.codePointAt(k) > 0xffff ? 2 : 1;
+        range.setStart(n, k); range.setEnd(n, k + size);
+        const rects = range.getClientRects();
+        if (!rects.length) { k += size - 1; continue; }
+        const line = at(rects[0].top, n);
+        if (s[k] !== '\n') push(line, s.slice(k, k + size), bits);
+        k += size - 1;
+      }
+    } else if (n.tagName === 'BR') {
+      range.selectNode(n);
+      const r = range.getClientRects();
+      if (r.length) at(r[0].top, n);
+    } else if (n.tagName === 'IMG') {
+      // a block of its own (display: block); the next content starts a new line
+      const li = liOf(n, root);
+      cur = { top: NaN, items: [['#img', n.getAttribute('data-gm') || '']], marker: !!li && !lines.some((l) => l.li === li), li };
+      lines.push(cur);
+      cur = { top: NaN, forceNew: true, items: [], li: null };
+    }
+  }
+  return lines.filter((l) => !l.forceNew).map((l) => [l.marker, l.items]);
+}
+
+function render(html) {
+  host.replaceChildren();
+  const el = document.createElement('div');
+  el.className = 'body';
+  host.appendChild(el);
+  el.appendChild(Rich.fromHtml(html)); // Rich.render without hydrate (no picture URLs)
+  return el;
+}
+
+// cases: [{html, saved}] → per case what v1.1 makes of the input and of v2's saved HTML
+window.GM_check = function (cases) {
+  return cases.map(({ html, saved }) => {
+    const san = Rich.serialize(Rich.fromHtml(html));
+    let el = render(html);
+    const plain = Rich.plain(el), vis = visual(el);
+    el = render(saved);
+    const savedPlain = Rich.plain(el), savedVis = visual(el);
+    const savedSan = Rich.serialize(Rich.fromHtml(saved));
+    host.replaceChildren();
+    return { san, plain, vis, savedPlain, savedVis, savedSan };
+  });
+};
+window.GM_ready = true;
+</script>
+</body>
+</html>

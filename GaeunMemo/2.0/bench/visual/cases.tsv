@@ -1,0 +1,32 @@
+# name	theme	band	w	h	color	states	title	text
+note_dark_thin	dark	thin	260	260	0	-	장보기	우유 2개\n계란 한 판\n사과 1 kg
+note_dark_thin_hover	dark	thin	260	260	0	hover	장보기	우유 2개\n계란 한 판\n사과 1 kg
+note_light_thin	light	thin	260	260	4	-	회의 메모	다음 주 화요일 오후 3시\n3층 회의실
+note_light_thin_hover	light	thin	260	260	4	hover	회의 메모	다음 주 화요일 오후 3시\n3층 회의실
+note_dark_none_hover	dark	none	260	260	2	hover	장보기	우유 2개\n계란 한 판
+note_light_none	light	none	260	260	2	-	장보기	우유 2개\n계란 한 판
+note_dark_full_hover	dark	full	260	260	3	hover	장보기	우유 2개\n계란 한 판
+note_light_full_hover	light	full	260	260	1	hover	장보기	우유 2개\n계란 한 판
+note_light_full_pinned	light	full	260	260	5	hover,pinned	고정된 메모	항상 위에 표시
+note_dark_empty	dark	thin	260	260	0	-
+note_light_empty_full	light	full	260	260	4	-
+note_dark_folded_thin	dark	thin	260	38	0	folded	접힌 메모	본문은 숨김
+note_light_folded_full	light	full	260	34	3	folded	접힌 메모	본문은 숨김
+note_dark_locked	dark	thin	260	260	0	locked,hover	잠긴 메모	수정할 수 없어요
+note_light_copied	light	thin	260	260	2	locked,copied	잠긴 메모	클릭하면 복사돼요
+note_dark_menu	dark	thin	260	260	0	menu	장보기	우유 2개\n계란 한 판
+note_light_menu_tall	light	full	260	320	1	menu	장보기	우유 2개\n계란 한 판
+note_dark_menu_locked_tall	dark	none	260	320	2	menu,locked	잠긴 메모	메뉴 일부 비활성
+note_dark_confirm	dark	thin	260	260	0	confirm	장보기	우유 2개\n계란 한 판
+note_light_confirm	light	full	260	260	4	confirm	장보기	우유 2개\n계란 한 판
+note_dark_rename	dark	thin	260	260	0	rename	장보기	우유 2개
+note_dark_fullscreen	dark	thin	700	420	0	full,hover	전체화면 메모	서식 도구 줄이 보여요\n두 번째 줄
+note_light_fullscreen	light	full	700	420	4	full,hover	전체화면 메모	서식 도구 줄이 보여요
+list_dark_thin	dark	thin	280	380	0	-
+list_light_thin	light	thin	280	380	0	-
+list_dark_full	dark	full	280	380	0	-
+list_light_none	light	none	280	380	0	-
+list_dark_noresult	dark	thin	280	380	0	search=zzzz
+list_light_ctx	light	thin	280	380	0	ctx
+note_dark_select	dark	thin	260	260	0	select	장보기	우유 2개\n계란 한 판
+note_light_select	light	thin	260	260	1	select	회의 메모	다음 주 화요일 오후 3시\n3층 회의실
