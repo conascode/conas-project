@@ -110,6 +110,14 @@ impl Out {
 
 /// The body document from its RTF (the story's final paragraph mark ends the last paragraph).
 pub fn read(rtf: &[u8]) -> Doc {
+    read_named(rtf, &[]).0
+}
+
+/// `read` of a stream made without object data (`SF_RTFNOOBJS`, P6): each picture is then
+/// `\objattph` plus one placeholder character; `names` are the pictures' names in story order
+/// (from TOM). Returns the document and how many names were used.
+pub fn read_named(rtf: &[u8], names: &[String]) -> (Doc, usize) {
+    let mut next_name = 0usize;
     let mut out = Out { doc: Doc::default(), para: Para { bullet: false, lines: vec![Vec::new()] }, run: Vec::new(), run_bits: 0 };
     let mut stack: Vec<(St, Mode, usize)> = Vec::new(); // saved state, mode, and the depth it began
     let mut st = St { bits: 0, font: 0, uc: 1 };
@@ -257,6 +265,14 @@ pub fn read(rtf: &[u8]) -> Doc {
                             b"ansicpg" => ansi_cp = param.unwrap_or(1252).max(0) as u32,
                             b"fonttbl" => mode = Mode::FontTbl,
                             b"colortbl" | b"stylesheet" | b"info" | b"pntext" | b"nonshppict" | b"listtable" | b"listoverridetable" | b"rsidtbl" | b"generator" | b"themedata" | b"latentstyles" | b"fldinst" => mode = Mode::Skip,
+                            b"objattph" => {
+                                // a picture streamed without its data: its name, then skip
+                                // the placeholder character that follows
+                                let name = names.get(next_name).cloned().unwrap_or_default();
+                                next_name += 1;
+                                out.image(&name);
+                                skip_fallback = 1;
+                            }
                             b"pict" => {
                                 mode = Mode::Pict;
                                 pict_name.clear();
@@ -381,5 +397,5 @@ pub fn read(rtf: &[u8]) -> Doc {
     if out.doc.paras.len() == 1 && out.doc.paras[0].lines.iter().all(|l| l.is_empty()) && out.doc.paras[0].lines.len() == 1 {
         out.doc.paras.clear();
     }
-    out.doc
+    (out.doc, next_name)
 }

@@ -8,7 +8,8 @@ use crate::menu::{self, Act};
 use crate::note::{self, WM_APP_CONFIRM, WM_APP_MENU, WM_APP_MENUCLOSED};
 use crate::theme::{g, mix, pal, Band, EDGE, PALETTE};
 use crate::win::{px, wide, x_of, y_of};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::DwmSetWindowAttribute;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -160,6 +161,43 @@ pub fn ago(ms: u64) -> String {
     }
 }
 
+thread_local! {
+    /// The search text of each note, lower-cased, while the list is open (P6: lower-casing
+    /// every note on each key cost 1.7 ms at 1,000 notes; the target is ≤ 1 ms). Each entry
+    /// carries a fingerprint of the note's title and text, so an edited note is redone.
+    /// Freed when the list window closes.
+    static LOWER: RefCell<HashMap<u64, (u64, String)>> = RefCell::new(HashMap::new());
+}
+
+/// A fast 64-bit fingerprint of title + text (not cryptographic: it only tells whether the
+/// cached lower-case copy is still the note's text).
+fn fingerprint(title: &str, text: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ ((title.len() as u64) << 32 | text.len() as u64);
+    for part in [title.as_bytes(), text.as_bytes()] {
+        let mut chunks = part.chunks_exact(8);
+        for c in &mut chunks {
+            h = (h ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(0x0000_0100_0000_01B3);
+            h ^= h >> 29;
+        }
+        let mut w = [0u8; 8];
+        w[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
+        h = (h ^ u64::from_le_bytes(w)).wrapping_mul(0x0000_0100_0000_01B3);
+        h ^= h >> 29;
+    }
+    h
+}
+
+/// `format!("{title}\n{text}").to_lowercase().contains(q)` (`q` already lower-cased), the
+/// lower-cased text kept between keys.
+fn matches(cache: &mut HashMap<u64, (u64, String)>, n: &app::Note, q: &str) -> bool {
+    let fp = fingerprint(&n.title, &n.text);
+    let e = cache.entry(n.id).or_insert_with(|| (!fp, String::new()));
+    if e.0 != fp {
+        *e = (fp, format!("{}\n{}", n.title, n.text).to_lowercase());
+    }
+    e.1.contains(q)
+}
+
 /// Newest edit first; ties keep "newest created first"; filtered by the search box.
 pub fn items(query: &str) -> (Vec<Item>, usize) {
     let q = query.trim().to_lowercase();
@@ -167,9 +205,15 @@ pub fn items(query: &str) -> (Vec<Item>, usize) {
         let mut v: Vec<&app::Note> = a.notes.iter().collect();
         v.sort_by(|x, y| y.updated_at.cmp(&x.updated_at).then(y.seq.cmp(&x.seq)));
         let total = v.len();
-        let items = v
-            .into_iter()
-            .filter(|n| q.is_empty() || format!("{}\n{}", n.title, n.text).to_lowercase().contains(&q))
+        let items = LOWER.with(|c| {
+            let mut cache = c.borrow_mut();
+            if !q.is_empty() && cache.len() > total {
+                // deleted notes
+                let ids: std::collections::HashSet<u64> = v.iter().map(|n| n.id).collect();
+                cache.retain(|id, _| ids.contains(id));
+            }
+            v.into_iter()
+            .filter(|n| q.is_empty() || matches(&mut cache, n, &q))
             .map(|n| Item {
                 id: n.id,
                 title: n.title.clone(),
@@ -179,7 +223,8 @@ pub fn items(query: &str) -> (Vec<Item>, usize) {
                 locked: n.locked,
                 updated_at: n.updated_at,
             })
-            .collect();
+            .collect()
+        });
         (items, total)
     })
 }
@@ -282,6 +327,20 @@ pub fn set_query(q: &str) {
         if let Some(s) = st(h) {
             SetWindowTextW(s.search, wide(q).as_ptr());
             rebuild(s.rows, s.search);
+        }
+    }
+}
+
+/// P6 timing: the filter alone (the rows rebuilt for query `q`), without the search box.
+pub fn filter_for_bench(q: &str) {
+    let h = hwnd();
+    unsafe {
+        if let Some(s) = st(h) {
+            if let Some(r) = rs(s.rows) {
+                let (items, total) = items(q);
+                r.items = items;
+                r.total = total;
+            }
         }
     }
 }
@@ -609,6 +668,7 @@ unsafe extern "system" fn list_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             remember(h, false);
             KillTimer(h, TIMER_AGO);
             LIST.with(|l| l.set(std::ptr::null_mut()));
+            LOWER.with(|c| *c.borrow_mut() = HashMap::new());
             if crate::cfg().quit_when_empty && app::open_windows().is_empty() {
                 PostQuitMessage(0);
             }
@@ -976,5 +1036,45 @@ unsafe extern "system" fn rows_proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -
             DefWindowProcW(h, msg, wp, lp)
         }
         _ => DefWindowProcW(h, msg, wp, lp),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::app::Note;
+    use std::collections::HashMap;
+
+    fn note(id: u64, title: &str, text: &str) -> Note {
+        Note { id, uuid: String::new(), title: title.into(), text: text.into(), html: String::new(), color: 0, pinned: false, folded: false, open: false, locked: false, maximized: false, rect: None, font_size: 14, created_at: 0, updated_at: 0, seq: 0 }
+    }
+
+    #[test]
+    fn matches_is_lowercase_contains() {
+        let notes = [("메모 1", "장보기 목록
+사과 1 kg — 토요일"), ("Résumé", "ÉCOLE Straße İstanbul"), ("ΟΔΟΣ", "ΣΊΣΥΦΟΣ end"), ("", "")];
+        let queries = ["메모", "kg —", "résumé", "école", "straße", "i̇stanbul", "οδος", "σίσυφος", "
+장보기", "없음", "a", ""];
+        let mut cache = HashMap::new();
+        for _ in 0..2 {
+            for (k, (t, x)) in notes.iter().enumerate() {
+                for q in queries {
+                    let want = format!("{t}
+{x}").to_lowercase().contains(q);
+                    assert_eq!(super::matches(&mut cache, &note(k as u64, t, x), q), want, "{t:?} {x:?} {q:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edited_note_is_searched_anew() {
+        let mut cache = HashMap::new();
+        assert!(super::matches(&mut cache, &note(1, "a", "사과 하나"), "사과"));
+        // same length, other text
+        assert!(!super::matches(&mut cache, &note(1, "a", "배배 하나"), "사과"));
+        assert!(super::matches(&mut cache, &note(1, "b", "배배 하나"), "b
+배배"));
+        assert_ne!(super::fingerprint("ab", "c"), super::fingerprint("a", "bc"));
+        assert_ne!(super::fingerprint("12345678", "x"), super::fingerprint("12345679", "x"));
     }
 }

@@ -93,6 +93,7 @@ pub fn run(input: &str, out: &str) {
     let mut rt = (0u32, 0u32);
     let mut bad = Vec::new();
     let (mut load_ms, mut save_ms) = (0.0f64, 0.0f64);
+    let mut pic_cases = (0u32, 0u32);
     if !input.is_empty() {
         let src = std::fs::read_to_string(input).unwrap_or_default();
         for (k, html) in src.split('\u{1e}').enumerate() {
@@ -107,6 +108,14 @@ pub fn run(input: &str, out: &str) {
             let tree = back.to_tree();
             let (html_fast, text_fast) = rich::stored(&back);
             let same_save = html_fast == rich::serialize(&tree) && text_fast == rich::plain(&tree);
+            // P6: with pictures, `save` streams no picture data and takes the names from TOM;
+            // it must give what the full stream gives
+            if back.to_html().contains("data-gm=") {
+                pic_cases.0 += 1;
+                if richedit::save_full(h).normal() != back.normal() {
+                    pic_cases.1 += 1;
+                }
+            }
             if back.normal() == doc.normal() && same_save {
                 rt.0 += 1;
             } else {
@@ -117,6 +126,7 @@ pub fn run(input: &str, out: &str) {
             }
         }
         t.check("RichEdit round trip keeps the normal form", rt.1 == 0, format!("{} / {}", rt.0, rt.0 + rt.1));
+        t.check("save without picture data = full stream (cases with pictures)", pic_cases.0 > 0 && pic_cases.1 == 0, format!("{} cases, {} differ", pic_cases.0, pic_cases.1));
     }
 
     // ---- save cost (report §9.3: serialization off the typing path, ≤ throttle)

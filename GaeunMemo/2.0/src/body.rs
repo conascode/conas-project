@@ -62,13 +62,31 @@ thread_local! {
     static MSFTEDIT: Cell<bool> = const { Cell::new(false) };
 }
 
+/// RichEdit's one-time set-up (the first RICHEDIT50W costs 25–40 ms more than later ones —
+/// P6 start-up profile), paid in a hidden throwaway control while the store opens on its own
+/// thread. Never shown, no parent.
+pub fn warm_richedit() {
+    crate::gfx::warm_fonts(unsafe { windows_sys::Win32::UI::HiDpi::GetDpiForSystem() });
+    ensure_richedit();
+    unsafe {
+        let h = CreateWindowExW(0, wide("RICHEDIT50W").as_ptr(), std::ptr::null(), WS_POPUP, 0, 0, 10, 10, std::ptr::null_mut(), std::ptr::null_mut(), GetModuleHandleW(std::ptr::null()), std::ptr::null());
+        if !h.is_null() {
+            DestroyWindow(h);
+        }
+    }
+}
+
 /// Loads msftedit.dll and initialises OLE the first time a RichEdit body is needed.
 pub fn ensure_richedit() {
     MSFTEDIT.with(|m| {
         if !m.get() {
             unsafe {
+                let t = std::time::Instant::now();
                 let _ = windows::Win32::System::Ole::OleInitialize(None);
+                let ole = t.elapsed().as_secs_f64() * 1000.0;
                 LoadLibraryW(wide("msftedit.dll").as_ptr());
+                crate::note::trace(0, ole);
+                crate::note::trace(1, t.elapsed().as_secs_f64() * 1000.0 - ole);
             }
             m.set(true);
         }
@@ -220,10 +238,16 @@ pub fn paint_to(h: HWND, dc: HDC, locked: bool) {
     }
 }
 
+/// No text and no picture. One line of length 0 — O(1), unlike `GetWindowTextLength`, which
+/// RichEdit answers by walking the whole text (it ran on every paint: P6 typing profile).
+fn is_empty(h: HWND) -> bool {
+    unsafe { SendMessageW(h, windows_sys::Win32::UI::Controls::EM_GETLINECOUNT, 0, 0) <= 1 && SendMessageW(h, windows_sys::Win32::UI::Controls::EM_LINELENGTH, 0, 0) == 0 }
+}
+
 /// "메모" placeholder of an empty body (.body.is-empty::before).
 fn placeholder(h: HWND, dc: HDC, locked: bool) {
     unsafe {
-        if GetWindowTextLengthW(h) != 0 || locked {
+        if locked || !is_empty(h) {
             return;
         }
         let dpi = GetDpiForWindow(h);
@@ -260,17 +284,28 @@ fn paint(h: HWND, locked: bool) {
         GetUpdateRect(h, &mut ur, 0);
         let dpi = GetDpiForWindow(h).max(96) as i32;
         let line = (prop(h, PROP_FONT).max(10) as i32 * 16 * dpi) / (10 * 96);
-        if ur.bottom - ur.top <= 3 * line {
+        let c0 = crate::metrics::prof_start();
+        // three lines plus the paragraph spacing a wrapped edit adds (typing measured 102 px
+        // = 3 × 33 + 3): such a repaint went the off-screen way, which lays out every line
+        if ur.bottom - ur.top <= 3 * line + line / 2 {
             NATIVE_PAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             DefSubclassProc(h, WM_PAINT, 0, 0);
-            let dc = GetDC(h);
-            placeholder(h, dc, locked);
-            ReleaseDC(h, dc);
+            crate::metrics::prof_add(0, c0);
+            let c1 = crate::metrics::prof_start();
+            if !locked && is_empty(h) {
+                let dc = GetDC(h);
+                placeholder(h, dc, locked);
+                ReleaseDC(h, dc);
+            }
+            crate::metrics::prof_add(1, c1);
         } else {
             BUFFERED_PAINTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             paint_buffered(h, locked);
+            crate::metrics::prof_add(2, c0);
         }
+        let c2 = crate::metrics::prof_start();
         sync_bar(h);
+        crate::metrics::prof_add(3, c2);
     }
 }
 
@@ -441,10 +476,13 @@ pub fn create(parent: HWND, kind: BodyKind, dpi: u32, text: &str, font_size: u8)
             BodyKind::None => return std::ptr::null_mut(),
             BodyKind::RichEdit => {
                 ensure_richedit();
+                let tw = std::time::Instant::now();
                 let h = CreateWindowExW(0, wide("RICHEDIT50W").as_ptr(), std::ptr::null(), style | re::ES_SAVESEL, 0, 0, 10, 10, parent, std::ptr::null_mut(), hinst, std::ptr::null());
                 if h.is_null() {
                     return h;
                 }
+                crate::note::trace6(0, tw.elapsed().as_secs_f64() * 1000.0);
+                let ta = std::time::Instant::now();
                 set_prop(h, PROP_KIND, 1);
                 set_prop(h, PROP_BAR, crate::sbar::create(parent, crate::sbar::Target::Rich(h)) as isize);
                 SendMessageW(h, re::EM_SETTEXTMODE, (re::TM_RICHTEXT.0 | re::TM_MULTILEVELUNDO.0) as usize, 0);
@@ -452,6 +490,7 @@ pub fn create(parent: HWND, kind: BodyKind, dpi: u32, text: &str, font_size: u8)
                 // paste / drop / copy follow v1.1's rules (crate::richedit)
                 crate::richedit::Callback::attach(h);
                 set_text(h, &text.replace('\n', "\r"));
+                crate::note::trace6(1, ta.elapsed().as_secs_f64() * 1000.0);
                 h
             }
             BodyKind::Edit => {
@@ -463,8 +502,12 @@ pub fn create(parent: HWND, kind: BodyKind, dpi: u32, text: &str, font_size: u8)
         };
         set_prop(h, PROP_FONT, font_size as isize);
         SetWindowSubclass(h, Some(body_proc), 7, 0);
+        let tt = std::time::Instant::now();
         apply_theme(h);
+        crate::note::trace6(2, tt.elapsed().as_secs_f64() * 1000.0);
+        let tf = std::time::Instant::now();
         set_font_size(h, font_size);
+        crate::note::trace6(3, tf.elapsed().as_secs_f64() * 1000.0);
         if kind == BodyKind::RichEdit {
             SendMessageW(h, EM_SETSEL, 0, 0);
             SendMessageW(h, EM_EMPTYUNDOBUFFER, 0, 0);

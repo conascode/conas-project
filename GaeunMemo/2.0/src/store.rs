@@ -81,6 +81,11 @@ pub static COMMITS: AtomicU64 = AtomicU64::new(0);
 pub static LAST_COMMIT_MS: AtomicU64 = AtomicU64::new(0);
 pub static FAILURES: AtomicU64 = AtomicU64::new(0);
 
+/// A window the writer tells when picture files have been written (`WM_APP_IMAGES_WRITTEN`):
+/// the UI then lets go of their bytes (images::release_written). 0 = nobody.
+pub static NOTIFY: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+pub const WM_APP_IMAGES_WRITTEN: u32 = 0x8000 + 31;
+
 pub fn active() -> bool {
     TX.with(|t| t.borrow().is_some())
 }
@@ -126,6 +131,19 @@ pub fn close() {
 
 /// The data folder of this build: `--data DIR`, else %APPDATA%\gaeunmemo2-dev (development
 /// builds never use v1.1's %APPDATA%\gaeunmemo — user decision 2026-11-14).
+/// Whether the store in `dir` has a note to show at start (a quick read-only look while the
+/// store is being opened): RichEdit and the fonts are warmed only then — a tray-only start
+/// would otherwise keep ≈ 0.7 MB it never uses (P6). A new folder counts as yes (the first
+/// run makes a note); an unreadable one too.
+pub fn has_open_notes(dir: &Path) -> bool {
+    let path = dir.join("gaeunmemo.db");
+    if !path.exists() {
+        return true;
+    }
+    let Ok(c) = Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX) else { return true };
+    c.query_row("SELECT EXISTS(SELECT 1 FROM note WHERE is_open=1 AND deleted_at IS NULL)", [], |r| r.get::<_, i64>(0)).map(|v| v != 0).unwrap_or(true)
+}
+
 pub fn default_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
     base.join("gaeunmemo2-dev")
@@ -212,6 +230,36 @@ pub fn open(dir: &Path) -> Result<Loaded, String> {
 /// `open`, with `step` run on the connection once the schema is there and before anything
 /// is loaded (P5: the v1 import), on the UI thread before the writer exists.
 pub fn open_with(dir: &Path, step: impl FnOnce(&mut Connection, &Path) -> Option<String>) -> Result<Loaded, String> {
+    let (conn, loaded) = prepare(dir, step)?;
+    start(conn, dir)?;
+    Ok(loaded)
+}
+
+/// `open_with` with the database work on its own thread while `meanwhile` runs on this (UI)
+/// thread — at start-up RichEdit's one-time set-up and the store's open + read overlap (P6:
+/// start-up time). The writer thread is started from here, as `open_with` does.
+pub fn open_parallel(dir: &Path, step: impl FnOnce(&mut Connection, &Path) -> Option<String> + Send + 'static, meanwhile: impl FnOnce()) -> Result<Loaded, String> {
+    let d = dir.to_path_buf();
+    let worker = std::thread::Builder::new().name("gm-open".into()).spawn(move || prepare(&d, step).map(|(c, l)| (SendConn(c), l)));
+    meanwhile();
+    let (conn, loaded) = match worker {
+        Ok(h) => h.join().map_err(|_| "저장 파일을 여는 중 오류가 났어요".to_string())??,
+        Err(_) => {
+            // no thread could be made (the step went with it: a v1 import then runs at the
+            // next start, as after any interrupted import)
+            return open_with(dir, |_, _| None);
+        }
+    };
+    start(conn.0, dir)?;
+    Ok(loaded)
+}
+
+/// A connection handed from the opening thread to the writer (rusqlite's `Connection` is
+/// `Send`; the wrapper only names the hand-over).
+struct SendConn(Connection);
+
+/// Opens (restoring a damaged file from a backup), migrates and reads the store. Any thread.
+fn prepare(dir: &Path, step: impl FnOnce(&mut Connection, &Path) -> Option<String>) -> Result<(Connection, Loaded), String> {
     std::fs::create_dir_all(dir.join("images")).map_err(|e| format!("데이터 폴더를 만들 수 없어요: {e}"))?;
     let path = dir.join("gaeunmemo.db");
     let mut notice = None;
@@ -298,13 +346,18 @@ pub fn open_with(dir: &Path, step: impl FnOnce(&mut Connection, &Path) -> Option
         it.filter_map(Result::ok).collect()
     };
 
+    Ok((conn, Loaded { notes, settings, windows, notice, step }))
+}
+
+/// Starts the writer thread with the opened connection; this thread is the one that sends.
+fn start(conn: Connection, dir: &Path) -> Result<(), String> {
     let (tx, rx) = mpsc::channel();
     let d = dir.to_path_buf();
     let handle = std::thread::Builder::new().name("gm-store".into()).spawn(move || writer(conn, d, rx)).map_err(|e| e.to_string())?;
     TX.with(|t| *t.borrow_mut() = Some(tx));
     DIR.with(|x| *x.borrow_mut() = Some(dir.to_path_buf()));
     WRITER.with(|w| *w.borrow_mut() = Some(handle));
-    Ok(Loaded { notes, settings, windows, notice, step })
+    Ok(())
 }
 
 // ------------------------------------------------------------------ writer thread
@@ -411,13 +464,29 @@ fn test_hold(dir: &Path) {
 
 fn commit(conn: &mut Connection, p: &mut Pending, dir: &Path) -> Result<(), CommitError> {
     // pictures first: a row may only be committed once the files it refers to are on disk
+    let c8 = crate::metrics::prof_start();
     let images_dir = dir.join("images");
-    let _ = std::fs::create_dir_all(&images_dir);
+    if !p.images.is_empty() {
+        // only when a picture is written: the call cost ≈ 0.9 ms of CPU on every commit
+        // (P6 typing profile — a third of the writer's time while typing)
+        let _ = std::fs::create_dir_all(&images_dir);
+    }
+    crate::metrics::prof_add(8, c8);
+    let wrote = !p.images.is_empty();
     while let Some((name, bytes)) = p.images.first().cloned() {
         write_image(&images_dir, &name, &bytes).map_err(|e| CommitError::Image(name.clone(), e))?;
         p.images.remove(0);
     }
+    if wrote {
+        let h = NOTIFY.load(Ordering::Relaxed);
+        if h != 0 {
+            unsafe { windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(h as _, WM_APP_IMAGES_WRITTEN, 0, 0) };
+        }
+    }
+    let c9 = crate::metrics::prof_start();
     let tx = conn.transaction()?;
+    crate::metrics::prof_add(9, c9);
+    let c10 = crate::metrics::prof_start();
     {
         let mut up = tx.prepare_cached(
             "INSERT INTO note (id,title,body_text,body_html,color,pinned,folded,is_open,locked,maximized,x,y,w,h,font_size,seq,created_at,updated_at)
@@ -481,8 +550,12 @@ fn commit(conn: &mut Connection, p: &mut Pending, dir: &Path) -> Result<(), Comm
             win.execute(params![name, *open as i64, x, y, w, h])?;
         }
     }
+    crate::metrics::prof_add(10, c10);
     test_hold(dir);
-    tx.commit()?;
+    let c0 = crate::metrics::prof_start();
+    let r = tx.commit();
+    crate::metrics::prof_add(7, c0);
+    r?;
     Ok(())
 }
 
@@ -581,7 +654,10 @@ fn writer(mut conn: Connection, dir: PathBuf, rx: Receiver<Cmd>) {
             continue;
         }
         if !pending.is_empty() {
-            match commit(&mut conn, &mut pending, &dir) {
+            let c0 = crate::metrics::prof_start();
+            let r = commit(&mut conn, &mut pending, &dir);
+            crate::metrics::prof_add(6, c0);
+            match r {
                 Ok(()) => {
                     pending = Pending::default();
                     retry_at = None;

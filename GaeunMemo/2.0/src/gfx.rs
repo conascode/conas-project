@@ -58,6 +58,28 @@ pub fn font(f: FontSpec, dpi: u32) -> HFONT {
     })
 }
 
+/// The note chrome's fonts made and drawn once into a memory DC: the first title drawn with
+/// Malgun Gothic Bold cost 4–6 ms (font file and Hangul glyphs — P6 paint profile). Run at
+/// start-up while the store opens on its own thread.
+pub fn warm_fonts(dpi: u32) {
+    unsafe {
+        let dc = CreateCompatibleDC(std::ptr::null_mut());
+        if dc.is_null() {
+            return;
+        }
+        let bmp = CreateCompatibleBitmap(dc, 8, 8);
+        let old = SelectObject(dc, bmp);
+        let r = rect(0, 0, 8, 8);
+        let sample = crate::win::wide("메모 제목 가나다라 abc 123 ✓ 복사됨");
+        for f in [FontSpec::bold(135), FontSpec::px(130), FontSpec::px(140)] {
+            text(dc, &sample[..sample.len() - 1], &r, font(f, dpi), 0, DT_SINGLELINE);
+        }
+        SelectObject(dc, old);
+        DeleteObject(bmp);
+        DeleteDC(dc);
+    }
+}
+
 pub fn brush(c: u32) -> HBRUSH {
     BRUSHES.with(|b| *b.borrow_mut().entry(c).or_insert_with(|| unsafe { CreateSolidBrush(c) }))
 }
@@ -118,8 +140,14 @@ pub fn print_into(dc: HDC, paint: impl FnOnce()) {
     PRINT_DC.with(|p| p.set(std::ptr::null_mut()));
 }
 
+thread_local! {
+    // P6 diagnostic: µs into each buffered paint at BeginPaint, bitmap made, drawn, done
+    pub static GFX_TRACE: std::cell::RefCell<Vec<[f64; 4]>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// BeginPaint → draw the whole client into a memory DC → BitBlt → EndPaint
 /// (or straight into the WM_PRINTCLIENT DC while `print_into` is active).
+
 pub fn paint_buffered(hwnd: HWND, f: impl FnOnce(HDC, i32, i32)) {
     let pdc = PRINT_DC.with(|p| p.get());
     if !pdc.is_null() {
@@ -129,19 +157,28 @@ pub fn paint_buffered(hwnd: HWND, f: impl FnOnce(HDC, i32, i32)) {
         return;
     }
     unsafe {
+        let t = std::time::Instant::now();
+        let mut lap = [0.0f64; 4];
         let mut ps: PAINTSTRUCT = std::mem::zeroed();
         let hdc = BeginPaint(hwnd, &mut ps);
+        lap[0] = t.elapsed().as_secs_f64() * 1e6;
         let mut rc = rect(0, 0, 0, 0);
         windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
         let (w, h) = (rc.right.max(1), rc.bottom.max(1));
         let mem = CreateCompatibleDC(hdc);
         let bmp = CreateCompatibleBitmap(hdc, w, h);
         let old = SelectObject(mem, bmp);
+        lap[1] = t.elapsed().as_secs_f64() * 1e6;
         f(mem, w, h);
+        lap[2] = t.elapsed().as_secs_f64() * 1e6;
         BitBlt(hdc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
         SelectObject(mem, old);
         DeleteObject(bmp);
         DeleteDC(mem);
         EndPaint(hwnd, &ps);
+        lap[3] = t.elapsed().as_secs_f64() * 1e6;
+        if crate::metrics::diag() {
+            GFX_TRACE.with(|g| g.borrow_mut().push(lap));
+        }
     }
 }

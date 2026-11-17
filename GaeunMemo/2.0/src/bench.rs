@@ -221,13 +221,19 @@ fn finish(hwnd: HWND, typing_pct: f64) {
 pub fn leak() {
     let c = cfg();
     note::register_class();
+    // P6: the notes (model) are made once; each cycle opens and destroys their windows, as
+    // the app does — before, every cycle added 50 new model notes and the test measured
+    // its own growing note list (≈ 1 KB per window)
+    let ids: Vec<u64> = (0..c.batch).map(|i| crate::app::add(&format!("메모 {}", i + 1), crate::body::SAMPLE, Some(i % 6), 0)).collect();
     let cycle = || {
-        let hs: Vec<HWND> = (0..c.batch)
-            .map(|i| {
-                let (x, y) = position(i);
-                let h = note::create(i, x, y, true);
+        let hs: Vec<HWND> = ids
+            .iter()
+            .enumerate()
+            .filter_map(|(i, id)| {
+                crate::app::open_note(*id, Some(position(i)), false);
+                let h = crate::app::window_of(*id)?;
                 unsafe { UpdateWindow(h) };
-                h
+                Some(h)
             })
             .collect();
         pump();

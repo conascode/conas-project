@@ -25,6 +25,8 @@ const TIMER_SAVE: usize = 1;
 const TIMER_COPIED: usize = 2;
 /// a resize settled: pictures follow the new text width
 const TIMER_REFIT: usize = 4;
+/// once, 2 s after the first note window: picture machinery warmed while idle (P6)
+const TIMER_WARM: usize = 5;
 const SAVE_DELAY: Duration = Duration::from_millis(300);
 const TME_NONCLIENT: u32 = 0x10;
 const WM_MOUSELEAVE_: u32 = 0x02A3;
@@ -38,6 +40,8 @@ pub const WM_APP_FONT: u32 = WM_APP + 4;
 pub const WM_APP_DIRTY: u32 = WM_APP + 6;
 /// a picture's display-size copy arrived from the decoding thread (lParam: Box<images::Decoded>)
 pub const WM_APP_DECODED: u32 = WM_APP + 7;
+/// Decoded pictures freed because their note closed before showing them (tests).
+pub static DROPPED_DECODED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 pub const WM_APP_MENU: u32 = WM_APP + 10;
 pub const WM_APP_MENUCLOSED: u32 = WM_APP + 11;
 pub const WM_APP_CONFIRM: u32 = WM_APP + 12;
@@ -83,6 +87,42 @@ pub struct NoteState {
 
 thread_local! {
     pub static NOTES: std::cell::RefCell<Vec<HWND>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+thread_local! {
+    /// Start-up trace of the first note window (ms): OleInitialize, msftedit load, body
+    /// created, body filled, font size, whole WM_CREATE — p6bench reads it.
+    pub static TRACE: std::cell::Cell<[f64; 6]> = const { std::cell::Cell::new([f64::NAN; 6]) };
+}
+
+thread_local! {
+    /// the picture machinery was (or is about to be) warmed
+    static WARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
+    /// body::create of the first note (ms): CreateWindowEx, callback + text, theme, font size
+    pub static TRACE6: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([f64::NAN; 4]) };
+}
+
+pub fn trace6(i: usize, ms: f64) {
+    TRACE6.with(|t| {
+        let mut v = t.get();
+        if v[i].is_nan() {
+            v[i] = ms;
+            t.set(v);
+        }
+    });
+}
+
+pub fn trace(i: usize, ms: f64) {
+    TRACE.with(|t| {
+        let mut v = t.get();
+        if v[i].is_nan() {
+            v[i] = ms;
+            t.set(v);
+        }
+    });
 }
 
 pub fn notes() -> Vec<HWND> {
@@ -365,6 +405,13 @@ fn relayout(s: &mut NoteState) {
 
 // ---------------------------------------------------------------- painting
 
+thread_local! {
+    // P6 diagnostic: µs in draw: layout, title font, title drawn, to then
+    pub static DRAW_TRACE: std::cell::RefCell<Vec<[f64; 4]>> = const { std::cell::RefCell::new(Vec::new()) };
+    // P6 diagnostic: µs of each note paint (measurement modes only)
+    pub static PAINT_TRACE: std::cell::RefCell<Vec<f64>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn paint(s: &mut NoteState) {
     let t0 = qpc();
     let Some(n) = app::note(s.id) else { return };
@@ -395,6 +442,9 @@ fn paint(s: &mut NoteState) {
         });
     }
     let us = qpc_us(qpc() - t0);
+    if crate::metrics::diag() {
+        PAINT_TRACE.with(|t| t.borrow_mut().push(us));
+    }
     let first = !s.painted;
     s.painted = true;
     stats::with(|st| {
@@ -410,10 +460,12 @@ fn paint(s: &mut NoteState) {
 /// Pure drawing of the chrome (also used by the screenshot mode).
 #[allow(clippy::too_many_arguments)]
 pub fn draw(hdc: HDC, w: i32, h: i32, dpi: u32, n: &app::Note, full: bool, hover: bool, hot: Option<Part>, down: Option<Part>, copied: bool, fmt_on: &[bool; 5]) {
+    let tq = std::time::Instant::now();
     let p = pal(app::theme());
     let band = app::band();
     let accent = PALETTE[n.color];
     let l = layout(w, dpi, n, full, hover);
+    let lay_us = tq.elapsed().as_secs_f64() * 1e6;
     gfx::fill(hdc, &rect(0, 0, w, h), p.paper);
     if l.strip > 0 {
         gfx::fill(hdc, &rect(0, 0, w, l.strip), accent);
@@ -440,7 +492,13 @@ pub fn draw(hdc: HDC, w: i32, h: i32, dpi: u32, n: &app::Note, full: bool, hover
         }
         let empty = n.title.is_empty();
         let txt = if empty { ws("제목") } else { ws(&n.title) };
-        gfx::text(hdc, &txt, &rect(l.title_x, l.bar.top, l.title_right, l.bar.bottom), gfx::font(FontSpec::bold(135), dpi), if empty { soft_c } else { title_c }, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        let tf = std::time::Instant::now();
+        let f = gfx::font(FontSpec::bold(135), dpi);
+        let font_us = tf.elapsed().as_secs_f64() * 1e6;
+        gfx::text(hdc, &txt, &rect(l.title_x, l.bar.top, l.title_right, l.bar.bottom), f, if empty { soft_c } else { title_c }, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        if crate::metrics::diag() {
+            DRAW_TRACE.with(|t| t.borrow_mut().push([lay_us, font_us, tf.elapsed().as_secs_f64() * 1e6, tq.elapsed().as_secs_f64() * 1e6]));
+        }
     }
 
     // tools (only while hovered)
@@ -666,6 +724,17 @@ fn on_body_change(s: &mut NoteState) {
 /// `rich::save` (report §6.4): the body as v1.1 formatted HTML plus its plain-text copy, into
 /// the in-memory model (SQLite in P3). The plain EDIT body of the PT-C bench has no HTML.
 fn serialize(s: &mut NoteState) {
+    let t0 = Instant::now();
+    serialize_inner(s);
+    let us = t0.elapsed().as_secs_f64() * 1e6;
+    stats::with(|st| {
+        st.ser_us_total += us;
+        st.sers += 1;
+        st.ser_us_max = st.ser_us_max.max(us);
+    });
+}
+
+fn serialize_inner(s: &mut NoteState) {
     let (html, text) = if cfg().body == crate::body::BodyKind::RichEdit {
         crate::rich::stored(&crate::richedit::save(s.body))
     } else {
@@ -686,6 +755,7 @@ fn serialize(s: &mut NoteState) {
     });
     app::touch(s.id);
     stats::with(|st| st.saves += 1);
+    crate::images::release_written();
 }
 
 /// 사진 넣기 (v1.1 file picker: png / jpeg / gif / webp, several at once).
@@ -1028,16 +1098,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_CREATE => {
             let pref: i32 = 1; // DWMWCP_DONOTROUND: square corners on Windows 11
             DwmSetWindowAttribute(hwnd, 33, &pref as *const i32 as *const _, 4);
+            let tc = std::time::Instant::now();
             if let Some(n) = app::note(s.id) {
                 let rich = cfg().body == crate::body::BodyKind::RichEdit;
                 s.body = body::create(hwnd, cfg().body, s.dpi, if rich { "" } else { &n.text }, n.font_size);
+                trace(2, tc.elapsed().as_secs_f64() * 1000.0);
                 relayout(s);
                 // filling the body is not an edit: no change notifications meanwhile
                 let mask = if rich { SendMessageW(s.body, windows::Win32::UI::Controls::RichEdit::EM_SETEVENTMASK, 0, 0) } else { 0 };
                 if rich {
                     // after layout: pictures are sized to the text width
+                    let tl = std::time::Instant::now();
                     crate::richedit::load(s.body, &crate::rich::Doc::load(&n.html, &n.text));
+                    trace(3, tl.elapsed().as_secs_f64() * 1000.0);
+                    let tf = std::time::Instant::now();
                     body::set_font_size(s.body, n.font_size);
+                    trace(4, tf.elapsed().as_secs_f64() * 1000.0);
                     s.pic_width = crate::richedit::text_css_width(s.body);
                 }
                 body::set_locked(s.body, n.locked);
@@ -1046,6 +1122,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
             }
             relayout(s);
+            trace(5, tc.elapsed().as_secs_f64() * 1000.0);
+            WARMED.with(|w| {
+                if !w.get() {
+                    w.set(true);
+                    SetTimer(hwnd, TIMER_WARM, 2000, None);
+                }
+            });
             0
         }
         // client = whole window, for both forms (wp = 0 is sent from CreateWindowEx;
@@ -1217,7 +1300,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_COMMAND => {
             let code = ((wp >> 16) & 0xFFFF) as u32;
             if lp as HWND == s.body && code == EN_CHANGE {
+                let c0 = crate::metrics::prof_start();
                 on_body_change(s);
+                crate::metrics::prof_add(4, c0);
             } else if lp as HWND == s.title_edit && code == EN_CHANGE {
                 on_title_change(s);
             }
@@ -1225,6 +1310,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_NOTIFY => {
             let hdr = &*(lp as *const windows_sys::Win32::UI::Controls::NMHDR);
+            let c0 = crate::metrics::prof_start();
+            let _guard = ProfGuard(5, c0);
             if hdr.hwndFrom == s.body && hdr.code == 0x0702 /* EN_SELCHANGE */ && is_full(hwnd) {
                 let st = body::format_state(s.body);
                 if st != s.fmt_on {
@@ -1251,6 +1338,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             KillTimer(hwnd, TIMER_SAVE);
             s.save_pending = false;
             serialize(s);
+            0
+        }
+        WM_TIMER if wp == TIMER_WARM => {
+            KillTimer(hwnd, TIMER_WARM);
+            crate::images::warm(s.dpi);
             0
         }
         WM_TIMER if wp == TIMER_REFIT => {
@@ -1361,9 +1453,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if !p.is_null() {
                 drop(Box::from_raw(p));
             }
+            // pictures decoded for this note but not shown yet (closed while decoding): the
+            // posted copies would be dropped with the window's queue and never freed
+            let mut m: MSG = std::mem::zeroed();
+            while PeekMessageW(&mut m, hwnd, WM_APP_DECODED, WM_APP_DECODED, PM_REMOVE) != 0 {
+                if m.lParam != 0 {
+                    drop(Box::from_raw(m.lParam as *mut crate::images::Decoded));
+                    DROPPED_DECODED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             DefWindowProcW(hwnd, msg, wp, lp)
         }
         _ => DefWindowProcW(hwnd, msg, wp, lp),
+    }
+}
+
+struct ProfGuard(usize, u64);
+impl Drop for ProfGuard {
+    fn drop(&mut self) {
+        crate::metrics::prof_add(self.0, self.1);
     }
 }
 

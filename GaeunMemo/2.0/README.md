@@ -57,6 +57,8 @@ another folder. Things to try:
 | `src/p3check.rs`, `bench/p3/kill.py` | `--mode p3check` (store checks on a new test folder) and the forced-termination test (`--mode p3kill` child, killed 0 / 100 / 350 ms after typing) |
 | `src/p2check.rs`, `bench/rich/*` | P2 checks and the differential test against v1.1's real `ui/rich.js` |
 | `src/selftest.rs`, `src/visual.rs`, `bench/visual/*` | P1 behaviour checks and the visual regression against v1.1 |
+| `src/p6bench.rs`, `bench/p6/run.py` | P6 measurements of the whole app in a test folder (report §13.11): `p6seed`, `p6bench` (startup, memory, idle / typing CPU, paint), `p6pic` (ten 4000×3000 pictures), `p6picleak` (that note opened and closed N times; private memory and the heaps' bytes in use), `p6list` (list search over many notes), `p6reimg` (RichEdit / picture pieces alone). `python -I bench\p6\run.py LABEL 3 120` runs the cases interleaved and writes medians to `bench\results\p6_LABEL_summary.json`. Nothing else should run meanwhile |
+| `app.manifest` | PerMonitorV2 DPI, comctl32 v6, UTF-8, Segment Heap (P6 A/B: less memory held after frees) |
 | `src/render.rs`, `src/bench.rs`, `src/metrics.rs`, `src/ptd.rs` | P0 prototypes and the measurement harness |
 
 ## Checks

@@ -58,6 +58,11 @@ pub fn paste_plain(h: HWND) {
     PLAIN_PASTE.with(|p| p.set(false));
 }
 
+/// `tdoc` for other modules (images::warm).
+pub fn tdoc_for(h: HWND) -> Option<ITextDocument2> {
+    tdoc(h)
+}
+
 fn tdoc(h: HWND) -> Option<ITextDocument2> {
     body::tom(h).map(|(_, d)| d)
 }
@@ -323,26 +328,50 @@ pub unsafe fn fix_spacing(h: HWND, a: i32, b: i32) {
         e += 1;
     }
     let sl = (body::font_size(h) as f32 * 1.6 * 15.0).round() as i32;
+    // each paragraph gets its rule once, and only when it has another one: every
+    // EM_SETPARAFORMAT re-lays the paragraph out (a picture line measures its picture) —
+    // the old "exact for all, then 'at least' for pictures" cost 7–15 ms per pasted picture
+    // (P6 paste stall). Display frozen meanwhile: one repaint at the end.
     let set = |a: usize, b: usize, rule: u8| {
         select(h, a as i32, b as i32);
+        let mut cur = paraformat();
+        SendMessageW(h, EM_GETPARAFORMAT, 0, &mut cur as *mut _ as isize);
+        // a range of several paragraphs with mixed rules reports PFM_LINESPACING unset
+        if (cur.Base.dwMask & PFM_LINESPACING).0 != 0 && cur.bLineSpacingRule == rule && cur.dyLineSpacing == sl {
+            return;
+        }
         let mut pf = paraformat();
         pf.Base.dwMask = PFM_LINESPACING;
         pf.bLineSpacingRule = rule;
         pf.dyLineSpacing = sl;
         SendMessageW(h, EM_SETPARAFORMAT, 0, &pf as *const _ as isize);
     };
+    let frozen = freeze(h);
     let (sa, sb) = get_sel(h);
-    set(s, e, 4);
+    // runs of paragraphs with the same rule, set together
+    let mut run: Option<(usize, usize, u8)> = None;
     let mut p = s;
     for k in s..=e {
         if k == e || text[k] == CR {
-            if text[p..k].contains(&OBJ) {
-                set(p, k, 3);
-            }
+            let rule = if text[p..k].contains(&OBJ) { 3 } else { 4 };
+            run = match run {
+                Some((ra, _, rr)) if rr == rule => Some((ra, k, rule)),
+                Some((ra, rb, rr)) => {
+                    set(ra, rb, rr);
+                    Some((p, k, rule))
+                }
+                None => Some((p, k, rule)),
+            };
             p = k + 1;
         }
     }
+    if let Some((ra, rb, rr)) = run {
+        set(ra, rb, rr);
+    }
     select(h, sa, sb);
+    if let Some(d) = frozen {
+        unfreeze(&d);
+    }
 }
 
 /// Replaces the whole body with `doc` (no undo history, no change notifications).
@@ -373,10 +402,24 @@ pub fn insert_doc(h: HWND, doc: &Doc) {
     }
 }
 
+thread_local! {
+    // P6 diagnostic: ms of `show_picture` steps (find, replace, select, unfreeze, KB)
+    pub static SHOW_TRACE: std::cell::RefCell<Vec<[f64; 6]>> = const { std::cell::RefCell::new(Vec::new()) };
+    // P6 diagnostic: ms per step of each `insert_picture` (text, breaks, insert, spacing,
+    // end edit, caret).
+    pub static INS_TRACE: std::cell::RefCell<Vec<[f64; 6]>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// A new picture on a line of its own (v1.1 shows pictures as blocks), as one undo step.
 pub fn insert_picture(h: HWND, name: &str) {
     let Some(d) = tdoc(h) else { return };
     let (a, b) = get_sel(h);
+    let mut tr = [0.0f64; 6];
+    let mut tk = std::time::Instant::now();
+    let mut lap = |i: usize| {
+        tr[i] = tk.elapsed().as_secs_f64() * 1000.0;
+        tk = std::time::Instant::now();
+    };
     unsafe {
         let _ = d.BeginEditCollection();
         if b > a {
@@ -385,6 +428,7 @@ pub fn insert_picture(h: HWND, name: &str) {
             }
         }
         let text = story_text(&d);
+        lap(0);
         let mut cp = a;
         let at_start = cp == 0 || text.get(cp as usize - 1) == Some(&CR);
         let at_end = text.get(cp as usize).is_none_or(|&c| c == CR);
@@ -399,11 +443,19 @@ pub fn insert_picture(h: HWND, name: &str) {
                 let _ = r.SetText(&BSTR::from("\r"));
             }
         }
+        lap(1);
         images::insert(&d, cp, name, text_css_width(h), GetDpiForWindow(h).max(96), windows_sys::Win32::UI::WindowsAndMessaging::GetParent(h));
+        lap(2);
         fix_spacing(h, cp, cp + 1);
+        lap(3);
         let _ = d.EndEditCollection();
+        lap(4);
         let caret = if at_end { cp + 1 } else { cp + 2 };
         select(h, caret, caret);
+        lap(5);
+    }
+    if crate::metrics::diag() {
+        INS_TRACE.with(|t| t.borrow_mut().push(tr));
     }
 }
 
@@ -525,6 +577,7 @@ pub fn show_picture(h: HWND, d: &images::Decoded) {
         return; // a newer request (another width) is on its way
     }
     let Some(doc) = tdoc(h) else { return };
+    let t0 = std::time::Instant::now();
     let text = story_text(&doc);
     let positions: Vec<i32> = text
         .iter()
@@ -538,18 +591,27 @@ pub fn show_picture(h: HWND, d: &images::Decoded) {
     }
     unsafe {
         // frozen: the body shows the result once, not each delete / insert step
+        let t1 = t0.elapsed().as_secs_f64() * 1000.0;
         let frozen = freeze(h);
         let (sa, sb) = get_sel(h);
         let mask = SendMessageW(h, EM_SETEVENTMASK, 0, 0);
         let _ = doc.Undo(tomSuspend.0);
         images::show_decoded(windows_sys::Win32::UI::WindowsAndMessaging::GetParent(h), &doc, &positions, d);
+        let t2 = t0.elapsed().as_secs_f64() * 1000.0;
         let _ = doc.Undo(tomResume.0);
         select(h, sa, sb);
         SendMessageW(h, EM_SETEVENTMASK, 0, mask);
+        let t3 = t0.elapsed().as_secs_f64() * 1000.0;
         if let Some(f) = frozen {
             unfreeze(&f);
         }
+        let t4 = t0.elapsed().as_secs_f64() * 1000.0;
+        if crate::metrics::diag() {
+            SHOW_TRACE.with(|t| t.borrow_mut().push([t1, t2 - t1, t3 - t2, t4 - t3, d.bytes.len() as f64 / 1024.0, 0.0]));
+        }
     }
+    crate::p6bench::SHOWN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    images::release_written();
 }
 
 /// The pictures in the body as (position, name).
@@ -665,6 +727,14 @@ fn live_passes(h: HWND) {
 }
 
 /// The whole body as RTF (EM_STREAMOUT).
+/// P6 experiment: the stream with any EM_STREAMOUT flags.
+pub fn stream_with(h: HWND, flags: u32) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::new();
+    let es = EDITSTREAM { dwCookie: &mut out as *mut _ as usize, dwError: 0, pfnCallback: Some(rtf_out) };
+    unsafe { SendMessageW(h, EM_STREAMOUT, flags as usize, &es as *const _ as isize) };
+    out
+}
+
 pub fn stream_rtf(h: HWND) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     let es = EDITSTREAM { dwCookie: &mut out as *mut _ as usize, dwError: 0, pfnCallback: Some(rtf_out) };
@@ -673,8 +743,43 @@ pub fn stream_rtf(h: HWND) -> Vec<u8> {
 }
 
 /// The whole body (one RTF stream-out, read in one pass — report §5.4 budget).
+///
+/// Pictures: RichEdit writes each picture's data into RTF as hex (ten pictures ≈ 470 KB,
+/// 10 ms of the UI thread every save — P6 paste stall). The stream is made without object
+/// data (`SF_RTFNOOBJS`: a `\objattph` mark per picture) and the names come from TOM, in story
+/// order. If the counts disagree, the full stream is read as before.
 pub fn save(h: HWND) -> Doc {
+    let t0 = std::time::Instant::now();
+    let names: Vec<String> = tdoc(h).map(|d| body_pictures(&d).into_iter().map(|(_, n)| n).collect()).unwrap_or_default();
+    let (d, kb) = if names.is_empty() {
+        let rtf = stream_rtf(h);
+        (crate::rtfread::read(&rtf), rtf.len())
+    } else {
+        let rtf = stream_with(h, (SF_RTFNOOBJS) as u32);
+        match crate::rtfread::read_named(&rtf, &names) {
+            (d, used) if used == names.len() => (d, rtf.len()),
+            _ => {
+                crate::log::write("save: picture marks and names differ, full stream used");
+                let rtf = stream_rtf(h);
+                (crate::rtfread::read(&rtf), rtf.len())
+            }
+        }
+    };
+    let t1 = t0.elapsed().as_secs_f64() * 1000.0;
+    if crate::metrics::diag() {
+        SAVE_TRACE.with(|t| t.borrow_mut().push([t1, 0.0, kb as f64 / 1024.0]));
+    }
+    d
+}
+
+/// `save` the old way, the pictures' data streamed and read (tests compare the two).
+pub fn save_full(h: HWND) -> Doc {
     crate::rtfread::read(&stream_rtf(h))
+}
+
+thread_local! {
+    // P6 diagnostic: ms of `save` steps (stream out, read) and RTF KB
+    pub static SAVE_TRACE: std::cell::RefCell<Vec<[f64; 3]>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 // ------------------------------------------------------------------ clipboard / drag data

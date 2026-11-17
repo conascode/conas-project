@@ -114,6 +114,27 @@ pub fn get(name: &str) -> Option<Arc<Vec<u8>>> {
     STORE.with(|s| s.borrow().get(name).cloned())
 }
 
+/// Lets go of the original bytes of every picture that is a file now and that nothing else
+/// holds (the store writer and the decoding thread hold their own `Arc` while they work):
+/// from then on the file is the source (report §8.2: "원본 바이트는 저장 스레드로 넘긴 뒤
+/// UI가 들고 있지 않음"). Before P6 they stayed until 64 MB — ten pasted photographs kept
+/// 11.6 MB. Called after a picture is shown and after a note is saved.
+pub fn release_written() {
+    let Some(dir) = crate::store::images_dir() else { return }; // no store: memory is the source
+    let gone: Vec<String> = STORE.with(|s| s.borrow().iter().filter(|(n, b)| Arc::strong_count(b) == 1 && dir.join(n.as_str()).exists()).map(|(n, _)| n.clone()).collect());
+    if gone.is_empty() {
+        return;
+    }
+    STORE.with(|s| {
+        let mut s = s.borrow_mut();
+        for n in &gone {
+            s.remove(n);
+        }
+        s.shrink_to_fit();
+    });
+    ORDER.with(|o| o.borrow_mut().retain(|n| !gone.contains(n)));
+}
+
 fn encode(src: &IWICBitmapSource, w: u32, h: u32, jpeg: bool) -> Option<(IStream, u64)> {
     let wic = wic()?;
     unsafe {
@@ -184,7 +205,7 @@ use windows::core::Interface;
 
 /// Display-size stream of a picture (PT-D′): v1.1 shows it at its pixel size in CSS px,
 /// capped at the note's text width (`max-width: 100%`).
-fn display_stream(bytes: &[u8], max_css_w: f64, dpi: u32) -> Option<(IStream, f64, f64, f64)> {
+pub(crate) fn display_stream(bytes: &[u8], max_css_w: f64, dpi: u32) -> Option<(IStream, f64, f64, f64)> {
     let wic = wic()?;
     unsafe {
         let src = SHCreateMemStream(Some(bytes))?;
@@ -272,7 +293,7 @@ thread_local! {
     static PLACEHOLDER: RefCell<HashMap<u32, Vec<u8>>> = RefCell::new(HashMap::new());
 }
 
-fn insert_stream(doc: &ITextDocument2, cp: i32, name: &str, stream: &IStream, cw: f64, ch: f64) -> bool {
+pub(crate) fn insert_stream(doc: &ITextDocument2, cp: i32, name: &str, stream: &IStream, cw: f64, ch: f64) -> bool {
     unsafe {
         let Ok(r) = doc.Range2(cp, cp) else { return false };
         let wh = (cw * HIMETRIC_PER_PX).round() as i32;
@@ -284,8 +305,8 @@ fn insert_stream(doc: &ITextDocument2, cp: i32, name: &str, stream: &IStream, cw
 /// Inserts picture `name` at `cp` (an empty range there): a grey placeholder at once, the
 /// picture itself when the decoding thread has it (report §11.1: no decoding on the UI
 /// thread). A picture without bytes or file keeps the placeholder — and its name.
-pub fn insert(doc: &ITextDocument2, cp: i32, name: &str, max_css_w: f64, dpi: u32, note: windows_sys::Win32::Foundation::HWND) -> bool {
-    let bytes = PLACEHOLDER.with(|p| {
+pub(crate) fn placeholder_bytes(dpi: u32) -> Vec<u8> {
+    PLACEHOLDER.with(|p| {
         p.borrow_mut()
             .entry(dpi)
             .or_insert_with(|| placeholder(dpi).and_then(|(s, _, _)| unsafe {
@@ -294,7 +315,51 @@ pub fn insert(doc: &ITextDocument2, cp: i32, name: &str, max_css_w: f64, dpi: u3
                 stream_bytes(&s, st.cbSize)
             }).unwrap_or_default())
             .clone()
-    });
+    })
+}
+
+/// The one-time costs of the first picture (the WIC factory, the grey placeholder for this
+/// DPI), paid while nothing happens instead of when the user pastes: the first paste stalled
+/// the UI thread 30–55 ms, later ones 5–11 ms (P6). Called 2 s after a note window opens.
+pub fn warm(dpi: u32) {
+    let Some(f) = wic() else { return };
+    let png = placeholder_bytes(dpi);
+    unsafe {
+        // the JPEG codec loads on its first use: a 2×2 JPEG through encoder and decoder
+        if let Ok(bmp) = f.CreateBitmapFromMemory(2, 2, &GUID_WICPixelFormat32bppBGRA, 8, &[0x80u8; 16]) {
+            if let Some((s, n)) = bmp.cast::<IWICBitmapSource>().ok().and_then(|src| encode(&src, 2, 2, true)) {
+                if let Some(jpg) = stream_bytes(&s, n) {
+                    let _ = pixel_size(&jpg);
+                }
+            }
+        }
+        // RichEdit's picture code loads on its first InsertImage: once into a hidden
+        // throwaway control (never the user's note)
+        let h = windows_sys::Win32::UI::WindowsAndMessaging::CreateWindowExW(
+            0,
+            crate::win::wide("RICHEDIT50W").as_ptr(),
+            std::ptr::null(),
+            windows_sys::Win32::UI::WindowsAndMessaging::WS_POPUP,
+            0,
+            0,
+            10,
+            10,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null()),
+            std::ptr::null(),
+        );
+        if !h.is_null() {
+            if let (Some(doc), Some(stream)) = (crate::richedit::tdoc_for(h), SHCreateMemStream(Some(&png))) {
+                let _ = insert_stream(&doc, 0, "warm", &stream, 12.0, 8.0);
+            }
+            windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow(h);
+        }
+    }
+}
+
+pub fn insert(doc: &ITextDocument2, cp: i32, name: &str, max_css_w: f64, dpi: u32, note: windows_sys::Win32::Foundation::HWND) -> bool {
+    let bytes = placeholder_bytes(dpi);
     let Some(stream) = (unsafe { SHCreateMemStream(Some(&bytes)) }) else { return false };
     let ok = insert_stream(doc, cp, name, &stream, 120.0, 80.0);
     if ok {

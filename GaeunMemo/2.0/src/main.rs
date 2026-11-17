@@ -32,6 +32,7 @@ mod p2check;
 mod p3check;
 mod p4check;
 mod p5check;
+mod p6bench;
 mod ptd;
 mod render;
 mod rich;
@@ -97,6 +98,10 @@ pub mod stats {
         pub paint_us_total: f64,
         pub paint_us_max: f64,
         pub saves: u64,
+        /// time spent in note::serialize (µs) and how many ran
+        pub ser_us_total: f64,
+        pub sers: u64,
+        pub ser_us_max: f64,
     }
     thread_local! {
         static S: RefCell<Stats> = RefCell::new(Stats::default());
@@ -212,6 +217,12 @@ fn main() {
         "p4check" => p4check::run(&c.data, &c.out),
         "p4child" => p4check::child(&c.data),
         "p5check" => p5check::run(&c.data, &c.out, &c.v1),
+        "p6seed" => p6bench::seed(&c.data, c.notes),
+        "p6bench" => p6bench::bench(&c.data, &c.out, &c.label, c.notes, c.idle_s, c.type_s),
+        "p6picleak" => p6bench::picleak(&c.data, &c.out, &c.label, c.cycles),
+        "p6reimg" => p6bench::reimg(&c.out, &c.label, c.cycles),
+        "p6list" => p6bench::list_filter(&c.data, &c.out, &c.label),
+        "p6pic" => p6bench::pic(&c.data, &c.out, &c.label, c.images.first().map(String::as_str).unwrap_or("bench/img/photo_4000x3000.jpg")),
         "export-v1" => {
             // rollback (report §16.3): the store in --data as a v1.1 notes.json at --out
             let dir = if c.data.is_empty() { store::default_dir() } else { std::path::PathBuf::from(&c.data) };
@@ -245,7 +256,13 @@ fn main() {
             let v1 = if c.v1.is_empty() { migrate::v1_dir() } else { std::path::PathBuf::from(&c.v1) };
             let sticky = migrate::sticky_path();
             let force = c.reimport_v1;
-            match store::open_with(&dir, |conn, d| migrate::on_open(conn, d, &v1, &sticky, force)) {
+            let warm_dir = dir.clone();
+            let warm = move || {
+                if store::has_open_notes(&warm_dir) {
+                    body::warm_richedit();
+                }
+            };
+            match store::open_parallel(&dir, move |conn, d| migrate::on_open(conn, d, &v1, &sticky, force), warm) {
                 Ok(loaded) => {
                     if let Some(m) = &loaded.step {
                         log::write(m);

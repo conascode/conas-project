@@ -105,6 +105,7 @@ pub fn create_with(dir: &std::path::Path, data: Option<std::path::PathBuf>, tray
             return h;
         }
         SESSION.with(|s| s.set(h));
+        crate::store::NOTIFY.store(h as isize, std::sync::atomic::Ordering::Relaxed);
         let _ = taskbar_created();
         // Explorer runs at a higher integrity level than nothing here, but an elevated
         // Explorer would filter the broadcast: let it through
@@ -235,6 +236,11 @@ unsafe extern "system" fn proc(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
                 WM_CONTEXTMENU => menu(h),
                 _ => {}
             }
+            0
+        }
+        crate::store::WM_APP_IMAGES_WRITTEN => {
+            // the files are on disk: the pasted originals need not stay in memory
+            crate::images::release_written();
             0
         }
         WM_QUERYENDSESSION => {
