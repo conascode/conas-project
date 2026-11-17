@@ -14,8 +14,8 @@
   <div class="sub">Phase 1 산출물: 기존 시스템(v1.1, Tauri 2 + WebView2) 분석, 성능 기준선 측정, Win32 Native 재개발 설계, 데이터 마이그레이션 계획, GDI/Direct2D·RichEdit 프로토타입 설계</div>
   <table>
     <tbody>
-      <tr><th style="width:28%">문서 번호</th><td>GM2-TDR-001</td><th style="width:20%">개정</th><td>Rev 3.0 (P4 구현)</td></tr>
-      <tr><th>작성일</th><td>2026-11-14 (초판 2026-11-13)</td><th>상태</th><td>P4 구현·자동 검증 완료, 사용자 화면 확인 대기</td></tr>
+      <tr><th style="width:28%">문서 번호</th><td>GM2-TDR-001</td><th style="width:20%">개정</th><td>Rev 3.3 (P5 완료)</td></tr>
+      <tr><th>작성일</th><td>2026-11-14 (초판 2026-11-13)</td><th>상태</th><td>P5 완료(2026-11-17, 실제 데이터 가져오기 확인). 다음 P6</td></tr>
       <tr><th>대상 시스템</th><td colspan="3">GaeunMemo 1.1 (이하 v1) — <code>gaeunmemo/</code> 저장소, Rust 1.100.0 · Tauri 2.12.5 · WebView2 157.0.4341.46. 설치본 exe의 파일 버전 표기는 0.1.0(버전 문자열 갱신 전 빌드)이지만 1.1 기능을 모두 포함한다.</td></tr>
       <tr><th>목표 시스템</th><td colspan="3">GaeunMemo 2.0 (이하 v2) — Rust + Win32 API, Native HWND / Native Edit Control, GDI 기본 렌더링, Direct2D·DirectWrite 선택적 사용, SQLite 저장소</td></tr>
       <tr><th>측정 환경</th><td colspan="3">AMD Ryzen AI 5 435 (논리 CPU 12개), RAM 16 GB, Windows 11 Home 10.0.26200, 2560×1600 @150 % 배율, 단일 모니터</td></tr>
@@ -56,6 +56,7 @@
     <a class="sub" href="#s13-7"><span class="t">13.7 P2 결과: 서식 본문·붙여넣기·사진·입력</span><span class="dots"></span><span class="pn" data-for="s13-7"></span></a>
     <a class="sub" href="#s13-8"><span class="t">13.8 P3 결과: 저장소·사진 파일·강제 종료</span><span class="dots"></span><span class="pn" data-for="s13-8"></span></a>
     <a class="sub" href="#s13-9"><span class="t">13.9 P4 결과: 트레이·자동 실행·단일 실행·작업표시줄</span><span class="dots"></span><span class="pn" data-for="s13-9"></span></a>
+    <a class="sub" href="#s13-10"><span class="t">13.10 P5 결과: v1 데이터 가져오기·되돌리기</span><span class="dots"></span><span class="pn" data-for="s13-10"></span></a>
     <a href="#s14"><span class="t">14. Testing and QA Strategy</span><span class="dots"></span><span class="pn" data-for="s14"></span></a>
     <a href="#s15"><span class="t">15. Risk Assessment</span><span class="dots"></span><span class="pn" data-for="s15"></span></a>
     <a href="#s16"><span class="t">16. Migration Strategy</span><span class="dots"></span><span class="pn" data-for="s16"></span></a>
@@ -77,6 +78,9 @@
       <tr><td>Rev 2.3</td><td>2026-11-14. P2(서식·붙여넣기·사진·잠금·IME) 결과 반영(13.7절): v1.1 <code>rich.js</code>와 크롬 안 차분 테스트(2,672건), RichEdit 왕복 636건, v1.1 UI 검사 1–8 이식, 저장·불러오기 비용, 입력 지연. 불러오기·저장에 RTF를 메모리 안 전달 수단으로 쓰는 결정(저장 형식은 v1.1 HTML 그대로). 6.4·17장, 부록 체크리스트 갱신.</td></tr>
       <tr><td>Rev 2.4</td><td>2026-11-14. P3(저장소) 결과 반영(13.8절): SQLite 스키마 v1·저장 스레드·사진 파일·디코딩 스레드, 저장 검사 23개, 강제 종료 175회, 저장 지연·메모리·실행 파일 크기 실측. 사용자 결정 2건 기록(rusqlite 번들 내려받기, 개발 빌드 전용 데이터 폴더). 15·17장, 부록 체크리스트 갱신.</td></tr>
       <tr><td>Rev 2.5</td><td>2026-11-14. P3 사용자 확인 반영(13.8절): 저장은 사용자 확인 통과. 사용자가 보고한 "사진이 글자 한 줄 높이로 눌림" 결함의 원인(정확한 줄 간격)과 수정(사진이 든 문단만 "최소" 줄 간격), 이를 잡는 자동 검사 추가(p2check 26개). 재부팅 후 데이터 보존 확인, 자동 실행은 P4 범위임을 명시.</td></tr>
+      <tr><td>Rev 3.3</td><td>2026-11-17. P5 완료: 사용자 계정에서 v2(P5 빌드)를 처음 실행 — v1.1 메모 2개·사진 1장 가져옴(누락 0, HTML 정규화 0), 메모 4개, <code>meta</code>에 원본 SHA-256 기록, <code>quick_check</code> 정상, v1.1 원본 그대로. 자동 실행 값은 실행한 사본(<code>dist\p5</code>)을 따라 고쳐짐(F-35 규칙).</td></tr>
+      <tr><td>Rev 3.2</td><td>2026-11-17. P5 결과 반영(13.10절): v1.1·StickyMemo 가져오기(읽기 전용 원본, 사진 복사, 한 트랜잭션 + 필드 대조), <code>--reimport-v1</code>, <code>--mode export-v1</code>(되돌리기). 사용자 결정 2건(개발 폴더 유지·복사, 합치기). p5check 17개(손상 주입 3종, 실데이터 사본 왕복 포함), 단위 테스트 34개.</td></tr>
+      <tr><td>Rev 3.1</td><td>2026-11-17. P4 완료: 사용자 화면 확인 8항목 통과(트레이 아이콘·툴팁, 왼쪽 클릭, 메뉴 4항목, 창을 다 닫아도 트레이에 남음·종료, 두 번째 실행, 작업표시줄 아이콘, 탐색기 재시작 후 아이콘 복구, 로그인 자동 실행). 사용자 결정 1건: 목록 창도 작업표시줄에.</td></tr>
       <tr><td>Rev 3.0</td><td>2026-11-16. P4 결과 반영(13.9절): 트레이·세션 창·단일 실행·자동 실행(복구 포함)·첫 실행·작업표시줄 아이콘·AUMID·로그. 사용자 결정 1건(개발 빌드 자동 실행 값 이름 <code>GaeunMemo2-dev</code>, 첫 실행에 켬). p4check 8개, 단위 테스트 29개.</td></tr>
       <tr><td>Rev 2.9</td><td>2026-11-16. P3 완료: 사용자 화면 확인 7항목(사진 크기, 휠, 트랙패드 관성, 크기 조절 중 사진·깜빡임, 스크롤 막대, 다시 시작 후 창 복원, 한자 변환) 통과. 그 사이 사용자 보고 4건 수정(시스템 막대 2 px 노출, 막대 끌기 끊김, 가장자리 크기 조절 잡기, 크기 조절 중 흰 번쩍임 — 표 13-8d). 화면 위 측정 도구 flashprobe 추가.</td></tr>
       <tr><td>Rev 2.8</td><td>2026-11-16. P3 마무리(표 13-8e): 14.2절의 커밋 도중 종료(25/25), 디스크 가득 참(SQLite 한도로 재현), 로그오프(종료 메시지 재현, 25/25) 통과. 시험 중 찾은 결함 수정 — 사진 파일 쓰기 실패 시 재시도하지 않던 것. p3check 28개, 강제 종료 시험 225회. 남은 것은 사용자 화면 확인.</td></tr>
@@ -1633,7 +1637,48 @@ A1–A6은 측정 방식 또는 글꼴 렌더러에서 생기는 차이이고, <
 </div>
 </div>
 <div class="dec"><b class="t">P4 결정 (사용자 결정 1건 포함).</b> ① <b>개발 빌드의 자동 실행 값 이름 = <code>GaeunMemo2-dev</code>, 첫 실행에 켬</b>(사용자 결정 2026-11-16). v1.1의 <code>gaeunmemo</code> 값은 읽지도 바꾸지도 않는다 — 개발 중에는 로그인 때 v1.1과 v2가 둘 다 뜬다. 설계(6.5절)의 "<code>gaeunmemo</code>를 덮어써 v1을 대체"는 설치 관리자(P7)로 미룬다. ② 같은 이유로 개발 빌드의 AUMID = <code>GaeunMemo2.Dev</code>(같은 ID면 v1.1 창과 한 아이콘으로 묶임), 옛 StickyMemo 시작 항목 정리는 하지 않음(다른 값을 지우는 동작). ③ 트레이 아이콘은 GUID가 아니라 ID로 식별: GUID 아이콘은 exe 경로 하나에 묶여, 개발 사본처럼 다른 경로에서 실행하면 등록이 실패한다. 설치 경로가 고정되는 P7에서 GUID로 바꿀 수 있다. ④ 단일 실행: 데이터 폴더별 명명 뮤텍스(P3) + 세션 창 제목(폴더 경로 포함)으로 기존 프로세스를 찾아 등록 메시지로 요청 — <code>WM_COPYDATA</code> 대신 인자 없는 메시지면 충분. ⑤ <b>목록 창도 작업표시줄에</b>(사용자 결정 2026-11-16 — v1.1 F-17은 목록 창을 작업표시줄에서 뺐다): <code>WS_EX_APPWINDOW</code>, 캡션 "메모 목록", 앱 아이콘, 작업표시줄 단추로 최소화·복원(<code>WS_MINIMIZEBOX</code>). 최소화된 채 닫히거나 끝나도 위치는 복원 위치로 저장, 트레이·두 번째 실행은 최소화된 목록을 되살린다.</div>
-<div class="warn"><b>P4에서 자동으로 확인하지 못한 것 — 사용자 확인 필요</b> <span class="U">미확인</span>. 트레이 아이콘이 실제 작업표시줄에 생기는 일이라 자동 검사에서 뺐다: 트레이 아이콘·툴팁, 왼쪽 클릭(열린 메모 앞으로/없으면 목록), 오른쪽 메뉴 4항목, 자동 실행 체크 전환, 종료, 탐색기 재시작 후 아이콘 복구(17장 P4 종료 기준), 로그인 시 자동 실행(포커스 안 뺏음), 작업표시줄 아이콘·메모별 버튼, 두 번째 실행 시 기존 창이 앞으로. 이 빌드를 처음 실행하면 첫 실행 규칙에 따라 <code>GaeunMemo2-dev</code> 값이 등록된다.</div>
+<div class="warn"><b>P4 사용자 확인 (2026-11-16 ~ 17) 통과.</b> 트레이 아이콘이 실제 작업표시줄에 생기는 일이라 자동 검사에서 뺀 항목을 화면에서 확인했다: 트레이 아이콘·툴팁, 왼쪽 클릭(열린 메모 앞으로/없으면 목록), 오른쪽 메뉴 4항목, 자동 실행 체크 전환, 종료, 탐색기 재시작 후 아이콘 복구(17장 P4 종료 기준), 로그인 시 자동 실행(포커스 안 뺏음), 작업표시줄 아이콘·메모별 버튼, 두 번째 실행 시 기존 창이 앞으로. 이 빌드를 처음 실행하면 첫 실행 규칙에 따라 <code>GaeunMemo2-dev</code> 값이 등록된다(확인: Run 키에 v1.1 <code>gaeunmemo</code>와 나란히 등록). 남은 것: v1.1 대신 v2만 시작하게 바꾸는 일은 v1.1 메모를 가져온 뒤(P5)·설치 관리자(P7).</div>
+
+<h3 id="s13-10" style="break-before:page">13.10 P5 결과: v1 데이터 가져오기·되돌리기 (2026-11-17)</h3>
+<p class="small"><b>대상:</b> <code>gaeunmemo2/</code> 릴리스 빌드(2,065,408 B — serde/serde_json 추가로 +177 KB, 목표 ≤ 2.5 MB 안). <b>구성:</b> <code>migrate.rs</code> — v1.1 <code>model.rs</code>(serde, 모든 필드 기본값, <code>sanitize</code>, 숫자 띠 변환)와 <code>import.rs</code>(StickyMemo 형식 1·2) 이식. 시작 때 <code>store::open_with</code>의 단계로 한 번 실행: 원본(<code>%APPDATA%\gaeunmemo\notes.json</code>, 없으면 StickyMemo)을 <b>읽기만</b> 하고, 참조 사진을 v2 폴더로 먼저 복사한 뒤, 한 트랜잭션으로 행을 넣고 <b>다시 읽어 필드마다 원본과 대조</b> — 하나라도 다르면 전부 취소. <code>meta</code>에 원본 경로·SHA-256(Windows CNG)·개수·누락 사진 수를 기록하고 로그를 남긴다. <code>--reimport-v1</code>은 그 뒤 v1.1에 새로 생긴 메모만 더하고, <code>--mode export-v1 --out FILE</code>은 v2 저장소를 v1.1 형식 notes.json으로 쓴다(되돌리기, 16.3절). <b>방법:</b> <code>--mode p5check</code>(새 시험 폴더 안에서 합성 v1 데이터를 만들어 시험, <code>--v1</code>로 실제 데이터 <b>사본</b>도 같은 왕복), 단위 테스트 5개.</p>
+<div class="grid2">
+<div>
+<table>
+  <caption>표 13-10a. P5 검사 (<code>--mode p5check</code>, 17개 전부 통과) <span class="M">측정</span></caption>
+  <thead><tr><th style="width:72%">검사</th><th>결과</th></tr></thead>
+  <tbody>
+    <tr><td>가져오기: 1,000개 + 경계 사례 4개(CRLF·이모지, 200,000자, 서식·사진·잠금·전체화면, v1.0 형식), BOM·숫자 띠</td><td>1,004 / 1,004, 81 ms</td></tr>
+    <tr><td>사진을 행보다 먼저 복사, 없는 사진 1개는 수만 기록(참조 유지)</td><td>통과</td></tr>
+    <tr><td>meta에 원본·SHA-256 기록, 원본 파일 바이트 그대로</td><td>통과</td></tr>
+    <tr><td><b>왕복 v1 → v2 → v1</b>: 모든 메모 필드(정규화 규칙: 줄바꿈 LF, 허용 목록 1회)</td><td>다른 필드 0</td></tr>
+    <tr><td>왕복: 목록 창·설정 5개, 순서(seq = v1 배열 위치)</td><td>통과</td></tr>
+    <tr><td><code>export-v1</code> 파일을 v1.1 읽기 함수로 다시 읽으면 같음</td><td>통과</td></tr>
+    <tr><td>두 번째 시작은 다시 가져오지 않음, <code>--reimport-v1</code>은 새 메모만</td><td>통과</td></tr>
+    <tr><td>합치기: v2 메모 유지, 같은 id는 건너뜀</td><td>통과</td></tr>
+    <tr><td>손상 주입 3종(잘린 파일, 타입 오류, JSON 아님): 가져오기 0, meta 없음, 원본·원본 폴더 그대로</td><td>통과</td></tr>
+    <tr><td>StickyMemo 형식 2: 첫 줄이 제목</td><td>통과</td></tr>
+    <tr><td><b>실제 v1.1 데이터 사본</b>(메모 2, 사진 1): 왕복 후 다른 필드 0, HTML 정규화 0, 사본 그대로</td><td>통과</td></tr>
+  </tbody>
+</table>
+</div>
+<div>
+<table>
+  <caption>표 13-10b. 16.1절 절차와의 대응</caption>
+  <thead><tr><th style="width:30%">설계</th><th>구현</th></tr></thead>
+  <tbody>
+    <tr><td>① 감지</td><td>저장소 <code>meta.migrated_from</code>이 없을 때(새 폴더든 기존 개발 폴더든). <code>--reimport-v1</code>은 다시</td></tr>
+    <tr><td>② 읽기·검증</td><td>v1.1 <code>parse</code> + <code>sanitize</code>, SHA-256</td></tr>
+    <tr><td>③ 임시 DB</td><td><b>변경</b>: 같은 DB의 한 트랜잭션 — 기존 개발 폴더에 합쳐 넣어야 해서(사용자 결정) 임시 파일 교체 대신. 원자성은 같다(실패·중단 시 롤백, meta 없음 → 다음 시작에 다시)</td></tr>
+    <tr><td>④ 대조</td><td>넣은 행을 다시 읽어 필드 비교, 커밋 뒤 <code>integrity_check</code></td></tr>
+    <tr><td>⑤ 확정</td><td>커밋 + meta</td></tr>
+    <tr><td>파싱 실패</td><td><b>변경</b>: 원본 폴더에 <code>notes-broken-*</code>를 만들지 않음(원본은 읽기 전용). 로그만, 가져오기 없음</td></tr>
+    <tr><td>사진</td><td><b>변경</b>: 공유 대신 복사(개발 폴더 유지 — 사용자 결정). 공유는 P7</td></tr>
+  </tbody>
+</table>
+</div>
+</div>
+<div class="dec"><b class="t">P5 결정 (사용자 결정 2건).</b> ① <b>데이터 폴더는 개발 폴더 유지, v1.1 데이터는 복사해 가져오기</b>(2026-11-17). v1.1이 아직 실행되는 동안 같은 폴더를 쓰면 v1.1의 24 h 사진 정리가 v2에서 넣은 사진을 지울 수 있어서. 같은 폴더로 옮기는 것은 v1.1을 대체할 때(P7). ② <b>기존 개발 메모와 합치기</b>(2026-11-17): 개발 폴더의 메모는 그대로, v1.1 메모를 더하고 같은 id는 건너뜀. 설정·목록 창은 개발 폴더에 이미 있는 값이 우선.</div>
+<div class="warn"><b>실제 데이터 확인 (2026-11-17) 통과.</b> 사용자가 P5 빌드를 처음 실행: 로그 <code>import: v1 …notes.json → 2 notes (skipped 0), pictures copied 1, missing 0, html normalised 0</code>, DB 메모 4개(개발 메모 2 + v1.1 메모 2)·사진 색인 3·<code>meta</code> 기록·<code>quick_check</code> 정상. 그 전에 같은 과정을 두 폴더의 사본으로 재현해 가져온 서식·사진 메모가 v1.1과 같이 그려지는 것을 화면 밖 캡처로 확인했다(확인용 사본은 메모 내용이 있어 바로 삭제). 원래 문구: 다음에 v2를 실행하면 v1.1 메모가 한 번 들어온다(지금 v1.1 메모 2개는 닫힌 상태라 창으로 뜨지 않고 목록에 보인다). 결과는 <code>%APPDATA%\gaeunmemo2-dev\gaeunmemo.log</code>의 <code>import:</code> 줄. 실제 로그인 사용자 프로세스에서의 가져오기는 이 도구가 대신 실행할 수 없다(이 도구의 AppData 쓰기는 다른 위치로 우회됨 — 3.7절).</div>
 
 <!-- ============================ 14 ============================ -->
 <h2 id="s14"><span class="no">14.</span>Testing and QA Strategy</h2>
@@ -1782,8 +1827,8 @@ A1–A6은 측정 방식 또는 글꼴 렌더러에서 생기는 차이이고, <
     <tr><td>P1 ✔</td><td><b>완료 2026-11-14</b>(13.6절, 허용 차이 A1–A8 승인). Ctrl+N/W·목록 키보드 수동 확인은 P2 시험 중 함께 한다.  7장 명세 전체 재현(메모·목록·메뉴·확인 카드·테마·띠·서식 줄·자물쇠·전체화면·DPI)</td><td>시각 회귀 매트릭스 통과(허용 차이 목록 승인), F-01~F-15, F-25, F-28, F-29 통과</td></tr>
     <tr><td>P2 ◐</td><td><b>구현·자동 검증 완료 2026-11-14, 한글 IME 사용자 확인(한자 변환 미확인, 13.7절).</b> RichEdit 통합, <code>rich</code> 변환기·정리기, 붙여넣기·끌어놓기, 잠금 입력 차단, 제목 이름 변경, Ctrl+휠, 한글 IME</td><td>F-04, F-26, F-30, F-32, F-33 통과, 정리기 차분 테스트 일치, IME 체크리스트 100 %, 입력 지연 p95 ≤ 4 ms, 직렬화 목표 이내</td></tr>
     <tr><td>P3 ✔</td><td><b>완료 2026-11-16</b>(13.8절, 사용자 화면 확인 포함, 14.2 재현 시험 통과). SQLite 스키마, 저장 스레드, 사진 쓰기·디코딩 스레드·캐시, 생성·닫기·삭제 규칙</td><td>F-09~F-11, F-21, F-31 통과, 14.2 강제 종료 테스트 통과, 저장 지연 ≤ 300 ms</td></tr>
-    <tr><td>P4 ◐</td><td><b>구현·자동 검증 완료 2026-11-16, 사용자 화면 확인 대기(13.9절).</b> 트레이, 세션 창, 단일 인스턴스, 자동 실행·복구, 첫 실행, 작업표시줄(AUMID), 로그</td><td>F-16~F-20, F-34~F-36 통과, 탐색기 재시작 후 트레이 복구</td></tr>
-    <tr><td>P5</td><td>백업·무결성 검사·복원, v1·StickyMemo 가져오기</td><td>손상 주입 테스트 통과, 실데이터 사본 마이그레이션 왕복 일치</td></tr>
+    <tr><td>P4 ✔</td><td><b>완료 2026-11-17</b>(13.9절, 사용자 화면 확인 포함). 트레이, 세션 창, 단일 인스턴스, 자동 실행·복구, 첫 실행, 작업표시줄(AUMID), 로그</td><td>F-16~F-20, F-34~F-36 통과, 탐색기 재시작 후 트레이 복구</td></tr>
+    <tr><td>P5 ✔</td><td><b>완료 2026-11-17</b>(13.10절, 실제 데이터 가져오기 확인). 백업·무결성 검사·복원, v1·StickyMemo 가져오기</td><td>손상 주입 테스트 통과, 실데이터 사본 마이그레이션 왕복 일치</td></tr>
     <tr><td>P6</td><td>프로파일링·최적화</td><td>13.1 목표 전부 충족</td></tr>
     <tr><td>P7</td><td>NSIS 설치 관리자, 호환 매트릭스, 72 h 상주</td><td>18장 합격 기준 전부 충족</td></tr>
   </tbody>

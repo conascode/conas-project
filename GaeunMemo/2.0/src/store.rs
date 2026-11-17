@@ -66,6 +66,8 @@ pub struct Loaded {
     pub windows: HashMap<String, (bool, Option<(f64, f64, f64, f64)>)>,
     /// what happened at open (restored from a backup, …) for the user / the log
     pub notice: Option<String>,
+    /// what the start-up step did (the v1 import), for the log
+    pub step: Option<String>,
 }
 
 thread_local! {
@@ -204,6 +206,12 @@ fn civil(z: i64) -> (i64, u32, u32) {
 
 /// Opens (or creates) the store in `dir`, checks it, loads everything and starts the writer.
 pub fn open(dir: &Path) -> Result<Loaded, String> {
+    open_with(dir, |_, _| None)
+}
+
+/// `open`, with `step` run on the connection once the schema is there and before anything
+/// is loaded (P5: the v1 import), on the UI thread before the writer exists.
+pub fn open_with(dir: &Path, step: impl FnOnce(&mut Connection, &Path) -> Option<String>) -> Result<Loaded, String> {
     std::fs::create_dir_all(dir.join("images")).map_err(|e| format!("데이터 폴더를 만들 수 없어요: {e}"))?;
     let path = dir.join("gaeunmemo.db");
     let mut notice = None;
@@ -230,10 +238,11 @@ pub fn open(dir: &Path) -> Result<Loaded, String> {
             }
         }
     }
-    let conn = Connection::open(&path).map_err(|e| format!("저장 파일을 열 수 없어요: {e}"))?;
+    let mut conn = Connection::open(&path).map_err(|e| format!("저장 파일을 열 수 없어요: {e}"))?;
     configure(&conn).map_err(|e| e.to_string())?;
     conn.execute_batch(SCHEMA).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "user_version", 1).map_err(|e| e.to_string())?;
+    let step = step(&mut conn, dir);
 
     let mut notes = Vec::new();
     {
@@ -295,7 +304,7 @@ pub fn open(dir: &Path) -> Result<Loaded, String> {
     TX.with(|t| *t.borrow_mut() = Some(tx));
     DIR.with(|x| *x.borrow_mut() = Some(dir.to_path_buf()));
     WRITER.with(|w| *w.borrow_mut() = Some(handle));
-    Ok(Loaded { notes, settings, windows, notice })
+    Ok(Loaded { notes, settings, windows, notice, step })
 }
 
 // ------------------------------------------------------------------ writer thread

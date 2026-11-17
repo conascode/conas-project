@@ -25,11 +25,13 @@ mod images;
 mod list;
 mod log;
 mod menu;
+mod migrate;
 mod metrics;
 mod note;
 mod p2check;
 mod p3check;
 mod p4check;
+mod p5check;
 mod ptd;
 mod render;
 mod rich;
@@ -66,6 +68,10 @@ pub struct Config {
     pub refdir: String,
     pub input: String,
     pub data: String,
+    /// v1.1 data folder to import from (default %APPDATA%\gaeunmemo; tests point elsewhere)
+    pub v1: String,
+    /// import again (notes added in v1.1 since the first import)
+    pub reimport_v1: bool,
     pub taskbar: bool,
     pub onscreen: bool,
     pub quit_when_empty: bool,
@@ -134,6 +140,8 @@ fn parse() -> Config {
         refdir: get("--refdir").unwrap_or_default(),
         input: get("--in").unwrap_or_default(),
         data: get("--data").unwrap_or_default(),
+        v1: get("--v1").unwrap_or_default(),
+        reimport_v1: has("--reimport-v1"),
         images: get("--images").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default(),
         taskbar: interactive || has("--taskbar"),
         onscreen: interactive || has("--onscreen"),
@@ -203,6 +211,15 @@ fn main() {
         "p3kill" => p3check::kill_child(&c.data, &c.label),
         "p4check" => p4check::run(&c.data, &c.out),
         "p4child" => p4check::child(&c.data),
+        "p5check" => p5check::run(&c.data, &c.out, &c.v1),
+        "export-v1" => {
+            // rollback (report §16.3): the store in --data as a v1.1 notes.json at --out
+            let dir = if c.data.is_empty() { store::default_dir() } else { std::path::PathBuf::from(&c.data) };
+            match migrate::export_file(&dir, std::path::Path::new(&c.out)) {
+                Ok(_) => std::process::exit(0),
+                Err(_) => std::process::exit(7),
+            }
+        }
         "gif" => ptd::gif(c.images.first().map(String::as_str).unwrap_or(""), &c.out, &c.label),
         "interactive" => {
             // P4: one app per data folder, resident in the tray (report §6.5, F-16 – F-20, F-35)
@@ -224,8 +241,15 @@ fn main() {
             log::install_panic_hook();
             log::write(&format!("start v{} autostart={autostarted}", env!("CARGO_PKG_VERSION")));
             note::register_class();
-            match store::open(&dir) {
+            // P5: v1.1's notes come in once (read only; pictures copied — report §16)
+            let v1 = if c.v1.is_empty() { migrate::v1_dir() } else { std::path::PathBuf::from(&c.v1) };
+            let sticky = migrate::sticky_path();
+            let force = c.reimport_v1;
+            match store::open_with(&dir, |conn, d| migrate::on_open(conn, d, &v1, &sticky, force)) {
                 Ok(loaded) => {
+                    if let Some(m) = &loaded.step {
+                        log::write(m);
+                    }
                     let notice = loaded.notice.clone();
                     let list_open = loaded.windows.get("list").is_some_and(|w| w.0);
                     let first_run = loaded.settings.get("initialized").map(String::as_str) != Some("1");

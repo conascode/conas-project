@@ -1,4 +1,4 @@
-# GaeunMemo 2.0 — P4 (tray, autostart, single instance, taskbar)
+# GaeunMemo 2.0 — P5 (v1 data import and export)
 
 Native rewrite planned in `../gaeunmemo/docs/GaeunMemo2_Technical_Report.pdf` (GM2-TDR-001).
 No Tauri, no WebView2: Rust + Win32, one process.
@@ -13,16 +13,23 @@ No Tauri, no WebView2: Rust + Win32, one process.
   (WAL, synchronous=FULL) written by one background thread, pictures as files. Development
   builds use their own folder **`%APPDATA%\gaeunmemo2-dev\`** (user decision 2026-11-14) and
   never touch v1.1's `%APPDATA%\gaeunmemo\`; importing v1 data is P5.
-- **P4** (this build): the app lives in the **tray** (left click: notes to the front, right
+- **P4** (done 2026-11-17): the app lives in the **tray** (left click: notes to the front, right
   click: 새 메모 / 메모 목록 / 컴퓨터 켤 때 자동 실행 / 종료); closing every window keeps it
   running, 종료 is in the tray menu. Starting it again brings the running one to the front.
   **Autostart** uses its own value `GaeunMemo2-dev` under HKCU Run (user decision
   2026-11-16; v1.1's `gaeunmemo` value is left alone) and is turned on at the first start.
   App icon on the taskbar, AUMID `GaeunMemo2.Dev`, v1.1-style log (256 KiB rotation).
+- **P5** (this build): at the first start the notes of v1.1 (`%APPDATA%\gaeunmemo
+otes.json`,
+  else the old StickyMemo file) come into the v2 store once — the source is only read,
+  the pictures they use are copied, the rows go in in one transaction and are compared
+  field by field with the source before it commits; v2 notes already there stay (merge,
+  user decision 2026-11-17). `--reimport-v1` adds notes made in v1.1 since;
+  `--mode export-v1 --out FILE` writes the v2 store as a v1.1 `notes.json` (rollback).
 
 ## Try it
 
-Run `dist\p4\gaeunmemo2.exe` (or `target\release\gaeunmemo2.exe` after a build) with no
+Run `dist\p5\gaeunmemo2.exe` (or `target\release\gaeunmemo2.exe` after a build) with no
 arguments. The first start opens one empty note; what you write, colours, sizes, places,
 전체화면 and pictures are there again after closing and restarting. `--data DIR` uses
 another folder. Things to try:
@@ -39,6 +46,7 @@ another folder. Things to try:
 | --- | --- |
 | `src/shell.rs`, `src/autostart.rs` | Tray icon and menu, the hidden session window (TaskbarCreated, session end, a second launch's request), HKCU Run value `GaeunMemo2-dev` (F-19 / F-35 rules in `autostart::plan`) |
 | `src/p4check.rs` | `--mode p4check`: second launch, session end, icon, autostart value (a test key, never the real Run key), log rotation |
+| `src/migrate.rs`, `src/p5check.rs` | v1.1 model (serde) and import / export; `--mode p5check` (1,000-note import, round trip, damaged sources, StickyMemo, `--v1 COPY` for a copy of real data) |
 | `src/store.rs` | SQLite store: schema v1 (report §12), writer thread (merges waiting changes per note, one transaction), pictures written temp → flush → rename before the rows that refer to them, quick_check + backup restore at start, daily backup (7 kept), 24 h orphan picture clean-up |
 | `src/log.rs` | `gaeunmemo.log` in the data folder (store failures, restores) |
 | `src/rich.rs` | v1.1 `rich.js` in Rust: HTML tokenizer + tree builder, allow-list sanitizer, `innerHTML`, Chromium `innerText` (the `text` copy), on-screen document model, one-pass save |

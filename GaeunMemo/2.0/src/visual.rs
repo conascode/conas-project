@@ -403,10 +403,28 @@ pub fn notesnap(data: &str, outdir: &str) {
     note::register_class();
     let f = wic();
     let _ = std::fs::create_dir_all(outdir);
-    let Ok(loaded) = crate::store::open(std::path::Path::new(data)) else { std::process::exit(3) };
+    // with --v1 COPY: the start-up import as the app does it, then every note is captured
+    // (imported notes may be closed) — all on copies
+    let v1 = crate::cfg().v1.clone();
+    let loaded = if v1.is_empty() {
+        crate::store::open(std::path::Path::new(data))
+    } else {
+        let v1 = std::path::PathBuf::from(v1);
+        let sticky = std::path::Path::new(data).join("no-sticky.json");
+        crate::store::open_with(std::path::Path::new(data), |c, d| crate::migrate::on_open(c, d, &v1, &sticky, false))
+    };
+    let Ok(loaded) = loaded else { std::process::exit(3) };
+    let step = loaded.step.clone().unwrap_or_default();
     app::load(loaded);
-    let notes: Vec<(u64, Option<(f64, f64, f64, f64)>)> = app::with(|a| a.notes.iter().filter(|n| n.open).map(|n| (n.id, n.rect)).collect());
-    let mut log = vec![Json::default().n("loaded", app::with(|a| a.notes.len()) as f64).n("open", notes.len() as f64).finish()];
+    let all = !crate::cfg().v1.is_empty();
+    let notes: Vec<(u64, Option<(f64, f64, f64, f64)>)> = app::with(|a| a.notes.iter().filter(|n| n.open || all).map(|n| (n.id, n.rect)).collect());
+    let summary: Vec<String> = app::with(|a| {
+        a.notes
+            .iter()
+            .map(|n| format!("{{\"uuid\":{},\"chars\":{},\"pictures\":{},\"open\":{},\"locked\":{}}}", crate::rich::json_str(&n.uuid), n.text.chars().count(), crate::store::image_refs(&n.html).len(), n.open, n.locked))
+            .collect()
+    });
+    let mut log = vec![Json::default().n("loaded", app::with(|a| a.notes.len()) as f64).n("open", notes.len() as f64).s("step", &step).raw("notes", format!("[{}]", summary.join(","))).finish()];
     metrics::append(&format!("{outdir}/notesnap.jsonl"), &log[0]);
     for (k, (id, rect)) in notes.iter().enumerate() {
         app::with(|a| a.notes.iter_mut().filter(|n| n.id == *id).for_each(|n| n.folded = false));
